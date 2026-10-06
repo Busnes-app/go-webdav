@@ -124,6 +124,9 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 	return true, nil
 }
 
+// maxMatchOccurrences caps recurrence expansion per time-range match.
+const maxMatchOccurrences = 100000
+
 func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
 	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
 
@@ -133,9 +136,22 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return false, err
 	}
 	if rset != nil {
-		// TODO we can only set inclusive to true or false, but really the
-		// start time is inclusive while the end time is not :/
-		return len(rset.Between(start, end, true)) > 0, nil
+		// Bounded: a runaway rule (e.g. SECONDLY from decades ago) must not
+		// burn CPU on every query. Hitting the cap is a conservative match.
+		next := rset.Iterator()
+		for i := 0; i < maxMatchOccurrences; i++ {
+			t, ok := next()
+			if !ok {
+				return false, nil
+			}
+			if !end.IsZero() && !t.Before(end) {
+				return false, nil
+			}
+			if !t.Before(start) {
+				return true, nil
+			}
+		}
+		return true, nil
 	}
 
 	// TODO handle more than just events

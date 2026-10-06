@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/xml"
 	"fmt"
+	"io"
 	"mime"
 	"net/http"
 	"path"
@@ -25,6 +26,8 @@ type PutCalendarObjectOptions struct {
 	// IfMatch provides the ETag of the resource that the client intends
 	// to overwrite, can be ""
 	IfMatch webdav.ConditionalMatch
+	// Fork: the request body exactly as received.
+	Raw []byte
 }
 
 // Backend is a CalDAV server backend.
@@ -49,6 +52,8 @@ type Backend interface {
 type Handler struct {
 	Backend Backend
 	Prefix  string
+	// Fork: maximum PUT body size in bytes; 0 means unlimited.
+	MaxResourceSize int64
 }
 
 // ServeHTTP implements http.Handler.
@@ -75,8 +80,9 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 		err = h.handleReport(w, r)
 	default:
 		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
+			Backend:         h.Backend,
+			Prefix:          strings.TrimSuffix(h.Prefix, "/"),
+			MaxResourceSize: h.MaxResourceSize,
 		}
 		hh := internal.Handler{Backend: &b}
 		hh.ServeHTTP(w, r)
@@ -224,8 +230,9 @@ func (h *Handler) handleQuery(r *http.Request, w http.ResponseWriter, query *cal
 	var resps []internal.Response
 	for _, co := range cos {
 		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
+			Backend:         h.Backend,
+			Prefix:          strings.TrimSuffix(h.Prefix, "/"),
+			MaxResourceSize: h.MaxResourceSize,
 		}
 		propfind := internal.PropFind{
 			Prop:     query.Prop,
@@ -268,8 +275,9 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 		}
 
 		b := backend{
-			Backend: h.Backend,
-			Prefix:  strings.TrimSuffix(h.Prefix, "/"),
+			Backend:         h.Backend,
+			Prefix:          strings.TrimSuffix(h.Prefix, "/"),
+			MaxResourceSize: h.MaxResourceSize,
 		}
 		propfind := internal.PropFind{
 			Prop:     multiget.Prop,
@@ -290,6 +298,8 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 type backend struct {
 	Backend Backend
 	Prefix  string
+	// Fork: maximum PUT body size in bytes; 0 means unlimited.
+	MaxResourceSize int64
 }
 
 type resourceType int
@@ -350,7 +360,9 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	w.Header().Set("Content-Type", ical.MIMEType)
-	if co.ContentLength > 0 {
+	if co.Raw != nil {
+		w.Header().Set("Content-Length", strconv.Itoa(len(co.Raw)))
+	} else if co.ContentLength > 0 {
 		w.Header().Set("Content-Length", strconv.FormatInt(co.ContentLength, 10))
 	}
 	if co.ETag != "" {
@@ -361,6 +373,10 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	}
 
 	if r.Method != http.MethodHead {
+		if co.Raw != nil {
+			_, err := w.Write(co.Raw)
+			return err
+		}
 		return ical.NewEncoder(w).Encode(co.Data)
 	}
 	return nil
@@ -620,6 +636,9 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 		}),
 		// TODO: calendar-data can only be used in REPORT requests
 		calendarDataName: func(*internal.RawXMLValue) (interface{}, error) {
+			if co.Raw != nil {
+				return &calendarDataResp{Data: co.Raw}, nil
+			}
 			var buf bytes.Buffer
 			if err := ical.NewEncoder(&buf).Encode(co.Data); err != nil {
 				return nil, err
@@ -689,12 +708,22 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: unsupported Content-Type %q", t)
 	}
 
-	// TODO: check CALDAV:max-resource-size precondition
-	cal, err := ical.NewDecoder(r.Body).Decode()
-	if err != nil {
-		// TODO: send CALDAV:valid-calendar-data error
-		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: failed to parse iCalendar: %v", err)
+	body := io.Reader(r.Body)
+	if b.MaxResourceSize > 0 {
+		body = io.LimitReader(r.Body, b.MaxResourceSize+1)
 	}
+	raw, err := io.ReadAll(body)
+	if err != nil {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: failed to read body: %v", err)
+	}
+	if b.MaxResourceSize > 0 && int64(len(raw)) > b.MaxResourceSize {
+		return NewPreconditionError(PreconditionMaxResourceSize)
+	}
+	cal, err := ical.NewDecoder(bytes.NewReader(raw)).Decode()
+	if err != nil {
+		return NewPreconditionError(PreconditionValidCalendarData)
+	}
+	opts.Raw = raw
 
 	co, err := b.Backend.PutCalendarObject(r.Context(), r.URL.Path, cal, &opts)
 	if err != nil {
