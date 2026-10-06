@@ -69,6 +69,14 @@ type Calendar struct {
 	Description           string
 	MaxResourceSize       int64
 	SupportedComponentSet []string
+	// Fork: served as http://apple.com/ns/ical/ calendar-color when set.
+	Color string
+	// Fork: served as http://calendarserver.org/ns/ getctag when set.
+	CTag string
+	// Fork: served as DAV:sync-token when set; also advertises sync-collection.
+	SyncToken string
+	// Fork: current-user-privilege-set omits write when true.
+	ReadOnly bool
 }
 
 type CalendarCompRequest struct {

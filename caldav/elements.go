@@ -21,6 +21,13 @@ var (
 	calendarQueryName    = xml.Name{namespace, "calendar-query"}
 	calendarMultigetName = xml.Name{namespace, "calendar-multiget"}
 
+	calendarColorName      = xml.Name{"http://apple.com/ns/ical/", "calendar-color"}
+	getCTagName            = xml.Name{"http://calendarserver.org/ns/", "getctag"}
+	syncTokenName          = xml.Name{"DAV:", "sync-token"}
+	supportedReportSetName = xml.Name{"DAV:", "supported-report-set"}
+	syncCollectionName     = xml.Name{"DAV:", "sync-collection"}
+	mkcalendarName         = xml.Name{namespace, "mkcalendar"}
+
 	calendarName     = xml.Name{namespace, "calendar"}
 	calendarDataName = xml.Name{namespace, "calendar-data"}
 )
@@ -241,4 +248,30 @@ type mkcolReq struct {
 	ResourceType internal.ResourceType `xml:"set>prop>resourcetype"`
 	DisplayName  string                `xml:"set>prop>displayname"`
 	// TODO this could theoretically contain all addressbook properties?
+}
+
+type calendarColor struct {
+	XMLName xml.Name `xml:"http://apple.com/ns/ical/ calendar-color"`
+	Color   string   `xml:",chardata"`
+}
+
+type getCTag struct {
+	XMLName xml.Name `xml:"http://calendarserver.org/ns/ getctag"`
+	CTag    string   `xml:",chardata"`
+}
+
+type syncTokenProp struct {
+	XMLName xml.Name `xml:"DAV: sync-token"`
+	Token   string   `xml:",chardata"`
+}
+
+func supportedReportSet(reports ...xml.Name) *internal.RawXMLValue {
+	var children []internal.RawXMLValue
+	for _, name := range reports {
+		report := internal.NewRawXMLElement(xml.Name{"DAV:", "report"}, nil,
+			[]internal.RawXMLValue{*internal.NewRawXMLElement(name, nil, nil)})
+		children = append(children, *internal.NewRawXMLElement(xml.Name{"DAV:", "supported-report"}, nil,
+			[]internal.RawXMLValue{*report}))
+	}
+	return internal.NewRawXMLElement(supportedReportSetName, nil, children)
 }
