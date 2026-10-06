@@ -4,6 +4,8 @@
 package caldav
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -141,3 +143,18 @@ type CalendarObject struct {
 	// Fork: when set, served byte-for-byte instead of re-encoding Data.
 	Raw []byte
 }
+
+// SyncBackend is implemented by backends that support RFC 6578 sync-collection.
+type SyncBackend interface {
+	SyncCalendar(ctx context.Context, path, syncToken string) (*SyncResult, error)
+}
+
+// SyncResult lists changes since a token. Deleted holds object paths.
+type SyncResult struct {
+	SyncToken string
+	Updated   []CalendarObject
+	Deleted   []string
+}
+
+// ErrInvalidSyncToken makes the server answer 403 DAV:valid-sync-token.
+var ErrInvalidSyncToken = errors.New("caldav: invalid sync token")

@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"errors"
 	"fmt"
 	"io"
 	"mime"
@@ -103,8 +104,54 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleQuery(r, w, report.Query)
 	} else if report.Multiget != nil {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
+	} else if report.Sync != nil {
+		return h.handleSyncCollection(r, w, report.Sync)
 	}
 	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query or calendar-multiget element in REPORT request")
+}
+
+func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, sync *internal.SyncCollectionQuery) error {
+	sb, ok := h.Backend.(SyncBackend)
+	if !ok {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: sync-collection not supported")
+	}
+	if sync.SyncLevel != "" && sync.SyncLevel != "1" {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: only sync-level 1 is supported")
+	}
+	res, err := sb.SyncCalendar(r.Context(), r.URL.Path, sync.SyncToken)
+	if errors.Is(err, ErrInvalidSyncToken) {
+		return &internal.HTTPError{Code: http.StatusForbidden, Err: &internal.Error{
+			Raw: []internal.RawXMLValue{*internal.NewRawXMLElement(xml.Name{Space: "DAV:", Local: "valid-sync-token"}, nil, nil)},
+		}}
+	}
+	if err != nil {
+		return err
+	}
+
+	b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/"), MaxResourceSize: h.MaxResourceSize}
+	prop := sync.Prop
+	if prop == nil {
+		prop = &internal.Prop{Raw: []internal.RawXMLValue{*internal.NewRawXMLElement(internal.GetETagName, nil, nil)}}
+	}
+	propfind := internal.PropFind{Prop: prop}
+
+	var resps []internal.Response
+	for i := range res.Updated {
+		resp, err := b.propFindCalendarObject(r.Context(), &propfind, &res.Updated[i])
+		if err != nil {
+			return err
+		}
+		resps = append(resps, *resp)
+	}
+	for _, p := range res.Deleted {
+		resps = append(resps, internal.Response{
+			Hrefs:  []internal.Href{{Path: p}},
+			Status: &internal.Status{Code: http.StatusNotFound},
+		})
+	}
+	ms := internal.NewMultiStatus(resps...)
+	ms.SyncToken = res.SyncToken
+	return internal.ServeMultiStatus(w, ms)
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {

@@ -157,3 +157,58 @@ func TestForkRecurrenceMatchSemantics(t *testing.T) {
 		}
 	}
 }
+
+type syncBackend struct {
+	rawBackend
+	gotToken string
+}
+
+func (b *syncBackend) SyncCalendar(ctx context.Context, path, token string) (*SyncResult, error) {
+	b.gotToken = token
+	if token == "bad" {
+		return nil, ErrInvalidSyncToken
+	}
+	obj, _ := b.GetCalendarObject(ctx, path+"raw-1.ics", nil)
+	return &SyncResult{SyncToken: "urn:test:9", Updated: []CalendarObject{*obj}, Deleted: []string{path + "gone.ics"}}, nil
+}
+
+func syncReport(t *testing.T, h *Handler, token string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `<d:sync-collection xmlns:d="DAV:"><d:sync-token>` + token + `</d:sync-token><d:sync-level>1</d:sync-level><d:prop><d:getetag/></d:prop></d:sync-collection>`
+	req := httptest.NewRequest("REPORT", "/user/calendars/cal/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestForkSyncCollection(t *testing.T) {
+	b := &syncBackend{}
+	w := syncReport(t, &Handler{Backend: b}, "urn:test:7")
+	if w.Code != 207 {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	resp := w.Body.String()
+	for _, want := range []string{"urn:test:9", "raw-1.ics", "e1", "gone.ics", "404"} {
+		if !strings.Contains(resp, want) {
+			t.Errorf("missing %q in:\n%s", want, resp)
+		}
+	}
+	if b.gotToken != "urn:test:7" {
+		t.Errorf("token passed %q", b.gotToken)
+	}
+}
+
+func TestForkSyncCollectionInvalidToken(t *testing.T) {
+	w := syncReport(t, &Handler{Backend: &syncBackend{}}, "bad")
+	if w.Code != 403 || !strings.Contains(w.Body.String(), "valid-sync-token") {
+		t.Fatalf("want 403 valid-sync-token, got %d %s", w.Code, w.Body.String())
+	}
+}
+
+func TestForkSyncCollectionUnsupported(t *testing.T) {
+	w := syncReport(t, &Handler{Backend: &rawBackend{}}, "")
+	if w.Code != 403 {
+		t.Fatalf("want 403 for backend without SyncBackend, got %d", w.Code)
+	}
+}
