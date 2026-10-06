@@ -564,6 +564,18 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 			Size: cal.MaxResourceSize,
 		})
 	}
+	if cal.Color != "" {
+		props[calendarColorName] = internal.PropFindValue(&calendarColor{Color: cal.Color})
+	}
+	if cal.CTag != "" {
+		props[getCTagName] = internal.PropFindValue(&getCTag{CTag: cal.CTag})
+	}
+	reports := []xml.Name{calendarQueryName, calendarMultigetName}
+	if cal.SyncToken != "" {
+		props[syncTokenName] = internal.PropFindValue(&syncTokenProp{Token: cal.SyncToken})
+		reports = append(reports, syncCollectionName)
+	}
+	props[supportedReportSetName] = internal.PropFindValue(supportedReportSet(reports...))
 
 	// TODO: CALDAV:calendar-timezone, CALDAV:supported-calendar-component-set, CALDAV:min-date-time, CALDAV:max-date-time, CALDAV:max-instances, CALDAV:max-attendees-per-instance
 
@@ -768,4 +780,12 @@ func NewPreconditionError(err PreconditionType) error {
 			Raw: []internal.RawXMLValue{*elem},
 		},
 	}
+}
+
+func calendarPrivileges(readOnly bool) *internal.CurrentUserPrivilegeSet {
+	privs := []internal.Privilege{{Read: &struct{}{}}}
+	if !readOnly {
+		privs = append(privs, internal.Privilege{Write: &struct{}{}})
+	}
+	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
 }
