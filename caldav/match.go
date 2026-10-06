@@ -127,6 +127,24 @@ func matchPropFilter(filter PropFilter, comp *ical.Component) (bool, error) {
 // maxMatchOccurrences caps recurrence expansion per time-range match.
 const maxMatchOccurrences = 100000
 
+// maxTimeSet bounds BYHOUR x BYMINUTE x BYSECOND: rrule-go builds every day of a period times
+// that set before the first occurrence, so maxMatchOccurrences cannot cap it.
+const maxTimeSet = 96
+
+func wideTimeSet(comp *ical.Component) bool {
+	opt, err := comp.Props.RecurrenceRule()
+	if err != nil || opt == nil {
+		return false
+	}
+	n := 1
+	for _, by := range [][]int{opt.Byhour, opt.Byminute, opt.Bysecond} {
+		if len(by) > 0 {
+			n *= len(by)
+		}
+	}
+	return n > maxTimeSet
+}
+
 func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
 	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
 
@@ -134,6 +152,9 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 	rset, err := comp.RecurrenceSet(start.Location())
 	if err != nil {
 		return false, err
+	}
+	if rset != nil && wideTimeSet(comp) {
+		return true, nil
 	}
 	if rset != nil {
 		// Bounded: a runaway rule (e.g. SECONDLY from decades ago) must not

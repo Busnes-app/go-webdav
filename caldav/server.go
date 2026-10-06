@@ -319,7 +319,13 @@ func (h *Handler) handleMultiget(ctx context.Context, w http.ResponseWriter, mul
 	}
 
 	var resps []internal.Response
+	// Every response holds a full object copy until the whole multistatus is written.
+	seen := make(map[string]bool, len(multiget.Hrefs))
 	for _, href := range multiget.Hrefs {
+		if seen[href.Path] {
+			continue
+		}
+		seen[href.Path] = true
 		co, err := h.Backend.GetCalendarObject(ctx, href.Path, &dataReq)
 		if err != nil {
 			resp := internal.NewErrorResponse(href.Path, err)
