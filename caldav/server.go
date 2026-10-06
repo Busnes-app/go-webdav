@@ -79,6 +79,12 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	switch r.Method {
 	case "REPORT":
 		err = h.handleReport(w, r)
+	case "MKCALENDAR":
+		b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/"), MaxResourceSize: h.MaxResourceSize}
+		err = b.mkcalendar(r)
+		if err == nil {
+			w.WriteHeader(http.StatusCreated)
+		}
 	default:
 		b := backend{
 			Backend:         h.Backend,
@@ -375,7 +381,7 @@ func (b *backend) Options(r *http.Request) (caps []string, allow []string, err e
 	caps = []string{"calendar-access"}
 
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject {
-		return caps, []string{http.MethodOptions, "PROPFIND", "REPORT", "DELETE", "MKCOL"}, nil
+		return caps, []string{http.MethodOptions, "PROPFIND", "PROPPATCH", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}, nil
 	}
 
 	var dataReq CalendarCompRequest
@@ -734,7 +740,128 @@ func (b *backend) propFindAllCalendarObjects(ctx context.Context, propfind *inte
 }
 
 func (b *backend) PropPatch(r *http.Request, update *internal.PropertyUpdate) (*internal.Response, error) {
-	return nil, internal.HTTPErrorf(http.StatusNotImplemented, "caldav: PropPatch not implemented")
+	cu, ok := b.Backend.(CalendarUpdater)
+	if !ok || b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return nil, internal.HTTPErrorf(http.StatusForbidden, "caldav: PROPPATCH not supported here")
+	}
+
+	var u CalendarUpdate
+	var names, rejected []xml.Name
+	apply := func(prop internal.Prop, remove bool) error {
+		for i := range prop.Raw {
+			raw := &prop.Raw[i]
+			name, ok := raw.XMLName()
+			if !ok {
+				continue
+			}
+			names = append(names, name)
+			value := ""
+			switch name {
+			case internal.DisplayNameName:
+				if !remove {
+					var v internal.DisplayName
+					if err := raw.Decode(&v); err != nil {
+						return err
+					}
+					value = v.Name
+				}
+				u.Name = &value
+			case calendarDescriptionName:
+				if !remove {
+					var v calendarDescription
+					if err := raw.Decode(&v); err != nil {
+						return err
+					}
+					value = v.Description
+				}
+				u.Description = &value
+			case calendarColorName:
+				if !remove {
+					var v calendarColor
+					if err := raw.Decode(&v); err != nil {
+						return err
+					}
+					value = v.Color
+				}
+				u.Color = &value
+			default:
+				rejected = append(rejected, name)
+			}
+		}
+		return nil
+	}
+	for _, s := range update.Set {
+		if err := apply(s.Prop, false); err != nil {
+			return nil, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+		}
+	}
+	for _, rm := range update.Remove {
+		if err := apply(rm.Prop, true); err != nil {
+			return nil, &internal.HTTPError{Code: http.StatusBadRequest, Err: err}
+		}
+	}
+
+	resp := &internal.Response{Hrefs: []internal.Href{{Path: r.URL.Path}}}
+	if len(rejected) > 0 {
+		// RFC 4918 9.2: PROPPATCH is atomic. Refused properties get 403, the rest 424.
+		for _, name := range names {
+			code := http.StatusFailedDependency
+			for _, bad := range rejected {
+				if bad == name {
+					code = http.StatusForbidden
+				}
+			}
+			if err := resp.EncodeProp(code, internal.NewRawXMLElement(name, nil, nil)); err != nil {
+				return nil, err
+			}
+		}
+		return resp, nil
+	}
+	if err := cu.UpdateCalendar(r.Context(), r.URL.Path, &u); err != nil {
+		return nil, err
+	}
+	for _, name := range names {
+		if err := resp.EncodeProp(http.StatusOK, internal.NewRawXMLElement(name, nil, nil)); err != nil {
+			return nil, err
+		}
+	}
+	return resp, nil
+}
+
+type mkcalendarReq struct {
+	XMLName xml.Name
+	Set     *internal.Set `xml:"DAV: set"`
+}
+
+func (b *backend) mkcalendar(r *http.Request) error {
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: calendar creation not allowed at given location")
+	}
+	cal := Calendar{Path: r.URL.Path}
+	if !internal.IsRequestBodyEmpty(r) {
+		var m mkcalendarReq
+		if err := internal.DecodeXMLRequest(r, &m); err != nil {
+			return err
+		}
+		if m.XMLName != mkcalendarName {
+			return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected mkcalendar request body")
+		}
+		if m.Set != nil {
+			var name internal.DisplayName
+			if err := m.Set.Prop.Decode(&name); err == nil {
+				cal.Name = name.Name
+			}
+			var desc calendarDescription
+			if err := m.Set.Prop.Decode(&desc); err == nil {
+				cal.Description = desc.Description
+			}
+			var color calendarColor
+			if err := m.Set.Prop.Decode(&color); err == nil {
+				cal.Color = color.Color
+			}
+		}
+	}
+	return b.Backend.CreateCalendar(r.Context(), &cal)
 }
 
 func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {

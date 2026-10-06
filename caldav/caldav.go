@@ -158,3 +158,13 @@ type SyncResult struct {
 
 // ErrInvalidSyncToken makes the server answer 403 DAV:valid-sync-token.
 var ErrInvalidSyncToken = errors.New("caldav: invalid sync token")
+
+// CalendarUpdate carries PROPPATCH changes; nil fields are unchanged, "" clears.
+type CalendarUpdate struct {
+	Name, Description, Color *string
+}
+
+// CalendarUpdater is implemented by backends that accept PROPPATCH on calendars.
+type CalendarUpdater interface {
+	UpdateCalendar(ctx context.Context, path string, update *CalendarUpdate) error
+}
