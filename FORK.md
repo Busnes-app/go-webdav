@@ -9,4 +9,7 @@ Patches (each one is a candidate upstream PR):
 2. Raw iCalendar bytes on PUT and GET; max-resource-size precondition.
 3. RFC 6578 sync-collection REPORT through an optional SyncBackend.
 4. PROPPATCH through an optional CalendarUpdater; MKCALENDAR.
-5. Bounded recurrence expansion in time-range matching (cap 100000 occurrences).
+5. Bounded recurrence expansion in time-range matching (cap 100000 occurrences; a rule whose
+   BYHOUR x BYMINUTE x BYSECOND exceeds 96 matches conservatively without expansion).
+6. calendar-multiget answers each distinct href once: every response holds a full object copy
+   until the multistatus is written.

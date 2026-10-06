@@ -9,6 +9,7 @@ import (
 	"github.com/emersion/go-ical"
 	"io"
 	"net/http/httptest"
+	"runtime"
 	"strings"
 	"testing"
 )
@@ -134,6 +135,29 @@ func TestForkRecurrenceMatchBounded(t *testing.T) {
 	}
 	if d := time.Since(begin); d > 2*time.Second {
 		t.Fatalf("match took %v", d)
+	}
+}
+
+func TestForkRecurrenceMatchWideTimeSet(t *testing.T) {
+	n := func(a, b int) string {
+		var s []string
+		for i := a; i < b; i++ {
+			s = append(s, fmt.Sprint(i))
+		}
+		return strings.Join(s, ",")
+	}
+	co := recurringCal(t, "20260101T000000Z", "FREQ=YEARLY;BYMONTH="+n(1, 13)+";BYMONTHDAY="+n(1, 32)+
+		";BYHOUR="+n(0, 24)+";BYMINUTE="+n(0, 60)+";BYSECOND="+n(0, 60))
+	start := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+	var before, after runtime.MemStats
+	runtime.ReadMemStats(&before)
+	ok, err := Match(rangeFilter(start, start.Add(time.Hour)), co)
+	runtime.ReadMemStats(&after)
+	if err != nil || !ok {
+		t.Fatalf("got %v, %v; want conservative true", ok, err)
+	}
+	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
+		t.Fatalf("match allocated %d bytes; the rule was expanded", alloc)
 	}
 }
 
@@ -279,5 +303,33 @@ func TestForkProppatchUnknownPropIsAtomic(t *testing.T) {
 	}
 	if b.update != nil {
 		t.Fatal("update applied despite a failed property")
+	}
+}
+
+type countingBackend struct {
+	rawBackend
+	gets int
+}
+
+func (b *countingBackend) GetCalendarObject(ctx context.Context, path string, req *CalendarCompRequest) (*CalendarObject, error) {
+	b.gets++
+	return b.rawBackend.GetCalendarObject(ctx, path, req)
+}
+
+// Each href costs a full object copy held until the response is written, so repeats are dropped.
+func TestForkMultigetDeduplicatesHrefs(t *testing.T) {
+	b := &countingBackend{}
+	href := "<d:href>/user/calendars/cal/raw-1.ics</d:href>"
+	body := `<c:calendar-multiget xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:prop><c:calendar-data/></d:prop>` +
+		strings.Repeat(href, 3) + `</c:calendar-multiget>`
+	req := httptest.NewRequest("REPORT", "/user/calendars/cal/", strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	(&Handler{Backend: b}).ServeHTTP(w, req)
+	if w.Code != 207 {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	if b.gets != 1 || strings.Count(w.Body.String(), "raw-1.ics") != 1 {
+		t.Fatalf("backend reads %d, body:\n%s", b.gets, w.Body.String())
 	}
 }
