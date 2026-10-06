@@ -139,6 +139,8 @@ type CalendarObject struct {
 	ContentLength int64
 	ETag          string
 	Data          *ical.Calendar
+	// Fork: when set, served byte-for-byte instead of re-encoding Data.
+	Raw []byte
 }
 
 // SyncQuery is the query struct represents a sync-collection request
