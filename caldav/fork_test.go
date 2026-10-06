@@ -212,3 +212,72 @@ func TestForkSyncCollectionUnsupported(t *testing.T) {
 		t.Fatalf("want 403 for backend without SyncBackend, got %d", w.Code)
 	}
 }
+
+type collBackend struct {
+	rawBackend
+	created *Calendar
+	update  *CalendarUpdate
+}
+
+func (b *collBackend) CreateCalendar(ctx context.Context, cal *Calendar) error {
+	b.created = cal
+	return nil
+}
+
+func (b *collBackend) UpdateCalendar(ctx context.Context, path string, u *CalendarUpdate) error {
+	b.update = u
+	return nil
+}
+
+func send(t *testing.T, h *Handler, method, path, body string) *httptest.ResponseRecorder {
+	t.Helper()
+	req := httptest.NewRequest(method, path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+func TestForkMkcalendar(t *testing.T) {
+	b := &collBackend{}
+	body := `<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav" xmlns:ic="http://apple.com/ns/ical/"><d:set><d:prop><d:displayname>Work</d:displayname><ic:calendar-color>#00ff00</ic:calendar-color></d:prop></d:set></c:mkcalendar>`
+	w := send(t, &Handler{Backend: b}, "MKCALENDAR", "/user/calendars/work/", body)
+	if w.Code != 201 {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	if b.created == nil || b.created.Name != "Work" || b.created.Color != "#00ff00" || b.created.Path != "/user/calendars/work/" {
+		t.Fatalf("created %+v", b.created)
+	}
+}
+
+func TestForkMkcalendarWrongPlace(t *testing.T) {
+	w := send(t, &Handler{Backend: &collBackend{}}, "MKCALENDAR", "/user/", "")
+	if w.Code != 403 {
+		t.Fatalf("want 403, got %d", w.Code)
+	}
+}
+
+func TestForkProppatch(t *testing.T) {
+	b := &collBackend{}
+	body := `<d:propertyupdate xmlns:d="DAV:" xmlns:ic="http://apple.com/ns/ical/"><d:set><d:prop><d:displayname>Home</d:displayname><ic:calendar-color>#123456</ic:calendar-color></d:prop></d:set></d:propertyupdate>`
+	w := send(t, &Handler{Backend: b}, "PROPPATCH", "/user/calendars/cal/", body)
+	if w.Code != 207 || !strings.Contains(w.Body.String(), "200") {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	if b.update == nil || *b.update.Name != "Home" || *b.update.Color != "#123456" || b.update.Description != nil {
+		t.Fatalf("update %+v", b.update)
+	}
+}
+
+func TestForkProppatchUnknownPropIsAtomic(t *testing.T) {
+	b := &collBackend{}
+	body := `<d:propertyupdate xmlns:d="DAV:" xmlns:ic="http://apple.com/ns/ical/"><d:set><d:prop><d:displayname>Home</d:displayname><ic:calendar-order>3</ic:calendar-order></d:prop></d:set></d:propertyupdate>`
+	w := send(t, &Handler{Backend: b}, "PROPPATCH", "/user/calendars/cal/", body)
+	resp := w.Body.String()
+	if w.Code != 207 || !strings.Contains(resp, "403") || !strings.Contains(resp, "424") {
+		t.Fatalf("want 403 + 424 propstats, got %d %s", w.Code, resp)
+	}
+	if b.update != nil {
+		t.Fatal("update applied despite a failed property")
+	}
+}
