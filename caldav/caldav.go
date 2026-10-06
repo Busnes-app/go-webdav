@@ -4,6 +4,8 @@
 package caldav
 
 import (
+	"context"
+	"errors"
 	"fmt"
 	"time"
 
@@ -150,9 +152,26 @@ type SyncQuery struct {
 	Limit       int // <= 0 means unlimited
 }
 
-// SyncResponse contains the returned sync-token for next time
+// SyncResponse contains the returned sync-token for next time (client-side).
 type SyncResponse struct {
 	SyncToken string
 	Updated   []CalendarObject
 	Deleted   []string
 }
+
+// SyncBackend is implemented by backends that support RFC 6578 sync-collection
+// on the server. SyncResult is structurally identical to SyncResponse; the two
+// are candidates to unify when upstreaming the server side.
+type SyncBackend interface {
+	SyncCalendar(ctx context.Context, path, syncToken string) (*SyncResult, error)
+}
+
+// SyncResult lists changes since a token (server-side). Deleted holds object paths.
+type SyncResult struct {
+	SyncToken string
+	Updated   []CalendarObject
+	Deleted   []string
+}
+
+// ErrInvalidSyncToken makes the server answer 403 DAV:valid-sync-token.
+var ErrInvalidSyncToken = errors.New("caldav: invalid sync token")
