@@ -2,6 +2,7 @@
 
 Upstream: github.com/emersion/go-webdav v0.7.0 (MIT, see LICENSE). Module path unchanged;
 KyCalendar wires it with a `replace` in its go.mod.
+Source of truth for review and upstreaming: github.com/Busnes-app/go-webdav (branch `kycalendar`).
 
 Patches (each one is a candidate upstream PR):
 
