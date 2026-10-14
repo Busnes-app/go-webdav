@@ -40,6 +40,26 @@ func TestForkCalendarProps(t *testing.T) {
 	}
 }
 
+// RFC 4918 §9.1: a missing Depth means infinity; both are refused with propfind-finite-depth.
+func TestForkPropfindInfiniteDepthRefused(t *testing.T) {
+	h := &Handler{Backend: testBackend{calendars: []Calendar{{Path: "/user/calendars/cal/"}}}}
+	for _, depth := range []string{"", "infinity"} {
+		req := httptest.NewRequest("PROPFIND", "/user/calendars/", strings.NewReader(propfindCalendarProps))
+		req.Header.Set("Content-Type", "application/xml")
+		if depth != "" {
+			req.Header.Set("Depth", depth)
+		}
+		w := httptest.NewRecorder()
+		h.ServeHTTP(w, req)
+		if w.Code != 403 || !strings.Contains(w.Body.String(), "propfind-finite-depth") {
+			t.Errorf("Depth %q: %d %s", depth, w.Code, w.Body.String())
+		}
+	}
+	if got := propfind(t, h, "/user/calendars/cal/", propfindCalendarProps); !strings.Contains(got, "multistatus") {
+		t.Fatalf("Depth 0 must still answer: %s", got)
+	}
+}
+
 func TestForkReadOnlyCalendarHasNoWrite(t *testing.T) {
 	cal := Calendar{Path: "/user/calendars/cal/", ReadOnly: true}
 	h := &Handler{Backend: testBackend{calendars: []Calendar{cal}}}
@@ -158,6 +178,62 @@ func TestForkRecurrenceMatchWideTimeSet(t *testing.T) {
 	}
 	if alloc := after.TotalAlloc - before.TotalAlloc; alloc > 16<<20 {
 		t.Fatalf("match allocated %d bytes; the rule was expanded", alloc)
+	}
+}
+
+// rrule-go checks UNTIL only on a matching candidate: sub-daily BYSETPOS steps every period to year
+// 9999, and an unreachable BYHOUR loops forever. Both must match conservatively, at once.
+func TestForkRecurrenceMatchStallingRule(t *testing.T) {
+	for _, tc := range []struct {
+		dtstart, rule string
+		want          bool
+	}{
+		{"20260101T090000Z", "FREQ=MINUTELY;BYSETPOS=2;UNTIL=20900101T000000Z", true},
+		{"20260101T090000Z", "FREQ=HOURLY;INTERVAL=2;BYHOUR=10", true},
+		{"20260101T090000Z", "FREQ=MINUTELY;INTERVAL=120;BYMINUTE=30", true},
+		{"20260101T090000Z", "FREQ=HOURLY;INTERVAL=2;BYHOUR=11;COUNT=3", false}, // reachable: expanded, ends before the range
+	} {
+		co := recurringCal(t, tc.dtstart, tc.rule)
+		start := time.Date(2027, 1, 1, 0, 0, 0, 0, time.UTC)
+		done := make(chan bool, 1)
+		go func() {
+			ok, _ := Match(rangeFilter(start, start.Add(time.Hour)), co)
+			done <- ok
+		}()
+		select {
+		case ok := <-done:
+			if ok != tc.want {
+				t.Errorf("%s: got %v, want %v", tc.rule, ok, tc.want)
+			}
+		case <-time.After(500 * time.Millisecond):
+			t.Fatalf("%s: Match did not return within 500ms", tc.rule)
+		}
+	}
+}
+
+// RFC 4791 §9.9: (start < DTEND AND end > DTSTART); a zero-length event (start <= DTSTART AND end > DTSTART).
+func TestForkTimeRangeBoundaries(t *testing.T) {
+	at := func(h int) time.Time { return time.Date(2026, 1, 1, h, 0, 0, 0, time.UTC) }
+	for _, tc := range []struct {
+		name, dtstart, dtend string
+		want                 bool
+	}{
+		{"zero length at start", "20260101T100000Z", "20260101T100000Z", true},
+		{"zero length at end", "20260101T120000Z", "20260101T120000Z", false},
+		{"fills the range", "20260101T100000Z", "20260101T120000Z", true},
+		{"ends at range end", "20260101T090000Z", "20260101T120000Z", true},
+		{"ends at range start", "20260101T090000Z", "20260101T100000Z", false},
+		{"starts at range end", "20260101T120000Z", "20260101T130000Z", false},
+	} {
+		src := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VEVENT\r\nUID:b\r\nDTSTAMP:20261006T120000Z\r\nDTSTART:" + tc.dtstart + "\r\nDTEND:" + tc.dtend + "\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+		cal, err := ical.NewDecoder(strings.NewReader(src)).Decode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Match(rangeFilter(at(10), at(12)), &CalendarObject{Data: cal})
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %v, %v; want %v", tc.name, got, err, tc.want)
+		}
 	}
 }
 
