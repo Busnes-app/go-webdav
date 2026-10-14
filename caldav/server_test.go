@@ -32,6 +32,7 @@ func TestPropFindSupportedCalendarComponent(t *testing.T) {
 		req := httptest.NewRequest("PROPFIND", calendar.Path, nil)
 		req.Body = io.NopCloser(strings.NewReader(propFindSupportedCalendarComponentRequest))
 		req.Header.Set("Content-Type", "application/xml")
+		req.Header.Set("Depth", "0")
 		w := httptest.NewRecorder()
 		handler := Handler{Backend: testBackend{calendars: []Calendar{*calendar}}}
 		handler.ServeHTTP(w, req)
@@ -66,6 +67,7 @@ var propFindUserPrincipal = `
 func TestPropFindRoot(t *testing.T) {
 	req := httptest.NewRequest("PROPFIND", "/", strings.NewReader(propFindUserPrincipal))
 	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "0")
 	w := httptest.NewRecorder()
 	calendar := &Calendar{}
 	handler := Handler{Backend: testBackend{calendars: []Calendar{*calendar}}}
@@ -117,6 +119,7 @@ func TestMultiCalendarBackend(t *testing.T) {
 	}
 	req := httptest.NewRequest("PROPFIND", "/user/calendars/", strings.NewReader(propFindUserPrincipal))
 	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "1")
 	w := httptest.NewRecorder()
 	handler := Handler{Backend: testBackend{
 		calendars: calendars,
@@ -142,6 +145,7 @@ func TestMultiCalendarBackend(t *testing.T) {
 	// Now do a PROPFIND for the last calendar
 	req = httptest.NewRequest("PROPFIND", calendarB.Path, strings.NewReader(propFindSupportedCalendarComponentRequest))
 	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "1")
 	w = httptest.NewRecorder()
 	handler.ServeHTTP(w, req)
 
