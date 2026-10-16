@@ -409,3 +409,55 @@ func TestForkMultigetDeduplicatesHrefs(t *testing.T) {
 		t.Fatalf("backend reads %d, body:\n%s", b.gets, w.Body.String())
 	}
 }
+
+// Fork: MKCALENDAR passes supported-calendar-component-set to the backend.
+func TestForkMkcalendarComponentSet(t *testing.T) {
+	b := &collBackend{}
+	body := `<c:mkcalendar xmlns:d="DAV:" xmlns:c="urn:ietf:params:xml:ns:caldav"><d:set><d:prop><d:displayname>Tasks</d:displayname><c:supported-calendar-component-set><c:comp name="VTODO"/></c:supported-calendar-component-set></d:prop></d:set></c:mkcalendar>`
+	w := send(t, &Handler{Backend: b}, "MKCALENDAR", "/user/calendars/tasks/", body)
+	if w.Code != 201 {
+		t.Fatalf("status %d %s", w.Code, w.Body.String())
+	}
+	if b.created == nil || strings.Join(b.created.SupportedComponentSet, ",") != "VTODO" {
+		t.Fatalf("created %+v", b.created)
+	}
+}
+
+// Fork: RFC 4791 §9.9's VTODO table, over the range 10:00 to 12:00.
+func TestForkToDoTimeRange(t *testing.T) {
+	at := func(h int) time.Time { return time.Date(2026, 1, 1, h, 0, 0, 0, time.UTC) }
+	filter := CompFilter{Name: "VCALENDAR", Comps: []CompFilter{{Name: "VTODO", Start: at(10), End: at(12)}}}
+	for _, tc := range []struct {
+		name, props string
+		want        bool
+	}{
+		{"start and duration overlapping", "DTSTART:20260101T090000Z\r\nDURATION:PT2H\r\n", true},
+		{"start and duration ending at range start", "DTSTART:20260101T080000Z\r\nDURATION:PT2H\r\n", true},
+		{"start and duration before", "DTSTART:20260101T070000Z\r\nDURATION:PT2H\r\n", false},
+		{"start and due spanning", "DTSTART:20260101T090000Z\r\nDUE:20260101T130000Z\r\n", true},
+		{"start and due before", "DTSTART:20260101T070000Z\r\nDUE:20260101T090000Z\r\n", false},
+		{"start and due starting at range end", "DTSTART:20260101T120000Z\r\nDUE:20260101T130000Z\r\n", false},
+		{"start at range start", "DTSTART:20260101T100000Z\r\n", true},
+		{"start at range end", "DTSTART:20260101T120000Z\r\n", false},
+		{"due at range end", "DUE:20260101T120000Z\r\n", true},
+		{"due at range start", "DUE:20260101T100000Z\r\n", false},
+		{"due after", "DUE:20260101T130000Z\r\n", false},
+		{"created and completed spanning", "CREATED:20260101T080000Z\r\nCOMPLETED:20260101T110000Z\r\n", true},
+		{"created and completed before", "CREATED:20260101T070000Z\r\nCOMPLETED:20260101T080000Z\r\n", false},
+		{"completed at range end", "COMPLETED:20260101T120000Z\r\n", true},
+		{"completed after", "COMPLETED:20260101T130000Z\r\n", false},
+		{"created before", "CREATED:20260101T080000Z\r\n", true},
+		{"created at range end", "CREATED:20260101T120000Z\r\n", false},
+		{"undated", "SUMMARY:someday\r\n", true},
+	} {
+		src := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:-//Test//EN\r\nBEGIN:VTODO\r\nUID:t\r\nDTSTAMP:20261006T120000Z\r\n" + tc.props + "END:VTODO\r\nEND:VCALENDAR\r\n"
+		cal, err := ical.NewDecoder(strings.NewReader(src)).Decode()
+		if err != nil {
+			t.Fatal(err)
+		}
+		got, err := Match(filter, &CalendarObject{Data: cal})
+		if err != nil || got != tc.want {
+			t.Errorf("%s: got %v, %v; want %v", tc.name, got, err, tc.want)
+		}
+	}
+}

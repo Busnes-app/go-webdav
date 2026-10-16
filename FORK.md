@@ -22,3 +22,7 @@ Patches (each one is a candidate upstream PR):
    DTSTART`, and a zero-length event matches at the range start.
 9. PROPFIND with `Depth: infinity`, or with no Depth (infinity per RFC 4918 §9.1), is 403 with
    the `DAV:propfind-finite-depth` precondition.
+10. MKCALENDAR passes `supported-calendar-component-set` to the backend in
+    `Calendar.SupportedComponentSet`; the backend decides which sets it accepts.
+11. VTODO time-range matching follows RFC 4791 §9.9's VTODO table (DTSTART with DURATION or
+    DUE, DUE alone, COMPLETED and CREATED, else always).
