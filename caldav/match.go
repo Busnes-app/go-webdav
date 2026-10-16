@@ -239,7 +239,10 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return true, nil
 	}
 
-	// TODO handle more than just events
+	if comp.Name == ical.CompToDo {
+		return matchToDoTimeRange(start, end, comp)
+	}
+	// TODO handle more than events and tasks
 	if comp.Name != ical.CompEvent {
 		return false, nil
 	}
@@ -260,6 +263,67 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return !eventStart.Before(start) && startsBeforeEnd, nil
 	}
 	return eventEnd.After(start) && startsBeforeEnd, nil
+}
+
+// matchToDoTimeRange is RFC 4791 §9.9's VTODO table. A zero end is an open range.
+func matchToDoTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
+	at := func(name string) (time.Time, bool, error) {
+		p := comp.Props.Get(name)
+		if p == nil {
+			return time.Time{}, false, nil
+		}
+		t, err := p.DateTime(start.Location())
+		return t, true, err
+	}
+	dtstart, hasStart, err := at(ical.PropDateTimeStart)
+	if err != nil {
+		return false, err
+	}
+	due, hasDue, err := at(ical.PropDue)
+	if err != nil {
+		return false, err
+	}
+	completed, hasCompleted, err := at(ical.PropCompleted)
+	if err != nil {
+		return false, err
+	}
+	created, hasCreated, err := at(ical.PropCreated)
+	if err != nil {
+		return false, err
+	}
+	// before(t) is start <= t (or < when strict); after(t) is end > t (or >= when inclusive).
+	before := func(t time.Time, strict bool) bool {
+		return start.Before(t) || (!strict && start.Equal(t))
+	}
+	after := func(t time.Time, inclusive bool) bool {
+		return end.IsZero() || end.After(t) || (inclusive && end.Equal(t))
+	}
+	var dur *ical.Prop
+	if hasStart {
+		dur = comp.Props.Get(ical.PropDuration)
+	}
+	switch {
+	case dur != nil:
+		d, err := dur.Duration()
+		if err != nil {
+			return false, err
+		}
+		stop := dtstart.Add(d)
+		return before(stop, false) && (after(dtstart, false) || after(stop, true)), nil
+	case hasStart && hasDue:
+		return (before(due, true) || before(dtstart, false)) && (after(dtstart, false) || after(due, true)), nil
+	case hasStart:
+		return before(dtstart, false) && after(dtstart, false), nil
+	case hasDue:
+		return before(due, true) && after(due, true), nil
+	case hasCompleted && hasCreated:
+		return (before(created, false) || before(completed, false)) && (after(created, true) || after(completed, true)), nil
+	case hasCompleted:
+		return before(completed, false) && after(completed, true), nil
+	case hasCreated:
+		return after(created, false), nil
+	}
+	return true, nil
 }
 
 func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {

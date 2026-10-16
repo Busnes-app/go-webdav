@@ -865,6 +865,13 @@ func (b *backend) mkcalendar(r *http.Request) error {
 			if err := m.Set.Prop.Decode(&color); err == nil {
 				cal.Color = color.Color
 			}
+			// Fork: the backend decides which component sets it accepts.
+			var comps supportedCalendarComponentSet
+			if err := m.Set.Prop.Decode(&comps); err == nil {
+				for _, c := range comps.Comp {
+					cal.SupportedComponentSet = append(cal.SupportedComponentSet, c.Name)
+				}
+			}
 		}
 	}
 	return b.Backend.CreateCalendar(r.Context(), &cal)
