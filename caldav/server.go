@@ -10,6 +10,7 @@ import (
 	"mime"
 	"net/http"
 	"path"
+	"sort"
 	"strconv"
 	"strings"
 	"time"
@@ -112,6 +113,8 @@ func (h *Handler) handleReport(w http.ResponseWriter, r *http.Request) error {
 		return h.handleMultiget(r.Context(), w, report.Multiget)
 	} else if report.Sync != nil {
 		return h.handleSyncCollection(r, w, report.Sync)
+	} else if report.FreeBusy != nil {
+		return h.handleFreeBusy(r, w, report.FreeBusy)
 	}
 	return internal.HTTPErrorf(http.StatusBadRequest, "caldav: expected calendar-query or calendar-multiget element in REPORT request")
 }
@@ -158,6 +161,88 @@ func (h *Handler) handleSyncCollection(r *http.Request, w http.ResponseWriter, s
 	ms := internal.NewMultiStatus(resps...)
 	ms.SyncToken = res.SyncToken
 	return internal.ServeMultiStatus(w, ms)
+}
+
+func (h *Handler) handleFreeBusy(r *http.Request, w http.ResponseWriter, q *freeBusyQuery) error {
+	fb, ok := h.Backend.(FreeBusyBackend)
+	if !ok {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: free-busy-query not supported")
+	}
+	b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/")}
+	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendar {
+		return internal.HTTPErrorf(http.StatusForbidden, "caldav: free-busy-query targets a calendar collection")
+	}
+	if q.TimeRange == nil {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: free-busy-query needs a time-range")
+	}
+	start, end := time.Time(q.TimeRange.Start).UTC(), time.Time(q.TimeRange.End).UTC()
+	if start.IsZero() || !end.After(start) {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: free-busy-query needs a time-range with start before end")
+	}
+	periods, err := fb.QueryFreeBusy(r.Context(), r.URL.Path, start, end)
+	if err != nil {
+		return err
+	}
+	var buf bytes.Buffer
+	if err := ical.NewEncoder(&buf).Encode(freeBusyCalendar(start, end, time.Now(), periods)); err != nil {
+		return err
+	}
+	w.Header().Set("Content-Type", ical.MIMEType)
+	_, err = w.Write(buf.Bytes())
+	return err
+}
+
+// freeBusyCalendar renders periods as one VFREEBUSY over [start, end): clipped to the range,
+// merged per FBTYPE where they overlap or touch, and sorted.
+func freeBusyCalendar(start, end, stamp time.Time, periods []FreeBusyPeriod) *ical.Calendar {
+	byType := map[string][]FreeBusyPeriod{}
+	for _, p := range periods {
+		if p.Type != FreeBusyTentative && p.Type != FreeBusyUnavailable {
+			p.Type = FreeBusy
+		}
+		if p.Start.Before(start) {
+			p.Start = start
+		}
+		if p.End.After(end) {
+			p.End = end
+		}
+		if p.End.After(p.Start) {
+			byType[p.Type] = append(byType[p.Type], p)
+		}
+	}
+	const layout = "20060102T150405Z"
+	fb := ical.NewComponent(ical.CompFreeBusy)
+	fb.Props.SetText(ical.PropUID, "free-busy-"+start.Format(layout)+"-"+end.Format(layout))
+	fb.Props.SetDateTime(ical.PropDateTimeStamp, stamp.UTC())
+	fb.Props.SetDateTime(ical.PropDateTimeStart, start)
+	fb.Props.SetDateTime(ical.PropDateTimeEnd, end)
+	for _, typ := range []string{FreeBusy, FreeBusyTentative, FreeBusyUnavailable} {
+		list := byType[typ]
+		sort.Slice(list, func(i, j int) bool { return list[i].Start.Before(list[j].Start) })
+		var merged []FreeBusyPeriod
+		for _, p := range list {
+			if n := len(merged); n > 0 && !p.Start.After(merged[n-1].End) {
+				if p.End.After(merged[n-1].End) {
+					merged[n-1].End = p.End
+				}
+				continue
+			}
+			merged = append(merged, p)
+		}
+		for _, p := range merged {
+			prop := ical.NewProp(ical.PropFreeBusy)
+			prop.Value = p.Start.UTC().Format(layout) + "/" + p.End.UTC().Format(layout)
+			if typ != FreeBusy {
+				prop.Params.Set(ical.ParamFreeBusyType, typ)
+			}
+			fb.Props.Add(prop)
+		}
+	}
+	cal := ical.NewCalendar()
+	cal.Props.SetText(ical.PropVersion, "2.0")
+	cal.Props.SetText(ical.PropProductID, "-//go-webdav//free-busy//EN")
+	cal.Children = append(cal.Children, fb)
+	return cal
 }
 
 func decodeParamFilter(el *paramFilter) (*ParamFilter, error) {
@@ -646,6 +731,9 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 		props[getCTagName] = internal.PropFindValue(&getCTag{CTag: cal.CTag})
 	}
 	reports := []xml.Name{calendarQueryName, calendarMultigetName}
+	if _, ok := b.Backend.(FreeBusyBackend); ok {
+		reports = append(reports, freeBusyQueryName)
+	}
 	if cal.SyncToken != "" {
 		props[syncTokenName] = internal.PropFindValue(&syncTokenProp{Token: cal.SyncToken})
 		reports = append(reports, syncCollectionName)

@@ -461,3 +461,121 @@ func TestForkToDoTimeRange(t *testing.T) {
 		}
 	}
 }
+
+type freeBusyBackend struct {
+	testBackend
+	periods  []FreeBusyPeriod
+	gotPath  string
+	gotStart time.Time
+	gotEnd   time.Time
+}
+
+func (b *freeBusyBackend) QueryFreeBusy(ctx context.Context, path string, start, end time.Time) ([]FreeBusyPeriod, error) {
+	b.gotPath, b.gotStart, b.gotEnd = path, start, end
+	return b.periods, nil
+}
+
+func freeBusyReport(t *testing.T, h *Handler, path, timeRange string) *httptest.ResponseRecorder {
+	t.Helper()
+	body := `<C:free-busy-query xmlns:C="urn:ietf:params:xml:ns:caldav">` + timeRange + `</C:free-busy-query>`
+	req := httptest.NewRequest("REPORT", path, strings.NewReader(body))
+	req.Header.Set("Content-Type", "application/xml")
+	req.Header.Set("Depth", "1")
+	w := httptest.NewRecorder()
+	h.ServeHTTP(w, req)
+	return w
+}
+
+const dayRange = `<C:time-range start="20261110T000000Z" end="20261111T000000Z"/>`
+
+func at(hhmm string) time.Time {
+	t, err := time.Parse("20060102T1504Z", "20261110T"+hhmm+"Z")
+	if err != nil {
+		panic(err)
+	}
+	return t
+}
+
+// RFC 4791 §7.10: one VFREEBUSY over the requested range, periods clipped, merged per FBTYPE.
+func TestForkFreeBusyQuery(t *testing.T) {
+	b := &freeBusyBackend{periods: []FreeBusyPeriod{
+		{Start: at("1000"), End: at("1100")},
+		{Start: at("0900"), End: at("1000")}, // touches the next: merged
+		{Start: at("1030"), End: at("1045")}, // inside: merged away
+		{Start: at("1300"), End: at("1400"), Type: FreeBusyTentative},
+		{Start: at("1500"), End: at("1530"), Type: "X-UNKNOWN"}, // rendered as BUSY
+		{Start: at("1600"), End: at("1700"), Type: FreeBusyUnavailable},
+		{Start: at("0000").Add(-2 * time.Hour), End: at("0030")}, // clipped to the range start
+		{Start: at("2300"), End: at("2300").Add(3 * time.Hour)},  // clipped to the range end
+		{Start: at("1200"), End: at("1200")},                     // empty: dropped
+	}}
+	w := freeBusyReport(t, &Handler{Backend: b}, "/user/calendars/cal/", dayRange)
+	if w.Code != 200 || w.Header().Get("Content-Type") != "text/calendar" {
+		t.Fatalf("status %d %q %s", w.Code, w.Header().Get("Content-Type"), w.Body.String())
+	}
+	if b.gotPath != "/user/calendars/cal/" || !b.gotStart.Equal(at("0000")) || !b.gotEnd.Equal(at("0000").Add(24*time.Hour)) {
+		t.Fatalf("backend got %q %v %v", b.gotPath, b.gotStart, b.gotEnd)
+	}
+	cal, err := ical.NewDecoder(w.Body).Decode()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if len(cal.Children) != 1 || cal.Children[0].Name != ical.CompFreeBusy {
+		t.Fatalf("components %+v", cal.Children)
+	}
+	fb := cal.Children[0]
+	if v := fb.Props.Get(ical.PropDateTimeStart).Value; v != "20261110T000000Z" {
+		t.Errorf("DTSTART %s", v)
+	}
+	if v := fb.Props.Get(ical.PropDateTimeEnd).Value; v != "20261111T000000Z" {
+		t.Errorf("DTEND %s", v)
+	}
+	var got []string
+	for _, p := range fb.Props[ical.PropFreeBusy] {
+		got = append(got, p.Params.Get(ical.ParamFreeBusyType)+" "+p.Value)
+	}
+	want := []string{
+		" 20261110T000000Z/20261110T003000Z",
+		" 20261110T090000Z/20261110T110000Z",
+		" 20261110T150000Z/20261110T153000Z",
+		" 20261110T230000Z/20261111T000000Z",
+		"BUSY-TENTATIVE 20261110T130000Z/20261110T140000Z",
+		"BUSY-UNAVAILABLE 20261110T160000Z/20261110T170000Z",
+	}
+	if strings.Join(got, "\n") != strings.Join(want, "\n") {
+		t.Errorf("FREEBUSY:\n%s\nwant:\n%s", strings.Join(got, "\n"), strings.Join(want, "\n"))
+	}
+}
+
+func TestForkFreeBusyQueryRefusals(t *testing.T) {
+	h := &Handler{Backend: &freeBusyBackend{}}
+	for name, c := range map[string]struct {
+		path, timeRange string
+		want            int
+	}{
+		"no time-range":        {"/user/calendars/cal/", "", 400},
+		"no end":               {"/user/calendars/cal/", `<C:time-range start="20261110T000000Z"/>`, 400},
+		"end before start":     {"/user/calendars/cal/", `<C:time-range start="20261111T000000Z" end="20261110T000000Z"/>`, 400},
+		"home, not a calendar": {"/user/calendars/", dayRange, 403},
+		"an object":            {"/user/calendars/cal/a.ics", dayRange, 403},
+	} {
+		if w := freeBusyReport(t, h, c.path, c.timeRange); w.Code != c.want {
+			t.Errorf("%s: %d, want %d: %s", name, w.Code, c.want, w.Body.String())
+		}
+	}
+	if w := freeBusyReport(t, &Handler{Backend: &rawBackend{}}, "/user/calendars/cal/", dayRange); w.Code != 403 {
+		t.Errorf("backend without FreeBusyBackend: %d, want 403", w.Code)
+	}
+}
+
+func TestForkFreeBusyQueryAdvertised(t *testing.T) {
+	cal := Calendar{Path: "/user/calendars/cal/"}
+	with := propfind(t, &Handler{Backend: &freeBusyBackend{testBackend: testBackend{calendars: []Calendar{cal}}}}, cal.Path, propfindCalendarProps)
+	if !strings.Contains(with, "free-busy-query") {
+		t.Errorf("FreeBusyBackend: supported-report-set lacks free-busy-query:\n%s", with)
+	}
+	without := propfind(t, &Handler{Backend: testBackend{calendars: []Calendar{cal}}}, cal.Path, propfindCalendarProps)
+	if strings.Contains(without, "free-busy-query") {
+		t.Errorf("plain backend advertises free-busy-query:\n%s", without)
+	}
+}
