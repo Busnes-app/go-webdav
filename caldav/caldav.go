@@ -144,6 +144,26 @@ type CalendarObject struct {
 	Raw []byte
 }
 
+// FreeBusyBackend is implemented by backends that answer the CALDAV:free-busy-query REPORT
+// (RFC 4791 §7.10). It returns the busy periods of the calendar at path overlapping
+// [start, end). The handler clips, merges and renders them, so no event data reaches the reply.
+type FreeBusyBackend interface {
+	QueryFreeBusy(ctx context.Context, path string, start, end time.Time) ([]FreeBusyPeriod, error)
+}
+
+// FreeBusyPeriod is one busy interval. Type is an RFC 5545 FBTYPE: FreeBusy, FreeBusyTentative
+// or FreeBusyUnavailable; anything else is rendered as FreeBusy.
+type FreeBusyPeriod struct {
+	Start, End time.Time
+	Type       string
+}
+
+const (
+	FreeBusy            = "BUSY"
+	FreeBusyTentative   = "BUSY-TENTATIVE"
+	FreeBusyUnavailable = "BUSY-UNAVAILABLE"
+)
+
 // SyncBackend is implemented by backends that support RFC 6578 sync-collection.
 type SyncBackend interface {
 	SyncCalendar(ctx context.Context, path, syncToken string) (*SyncResult, error)
