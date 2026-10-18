@@ -20,6 +20,7 @@ var (
 
 	calendarQueryName    = xml.Name{namespace, "calendar-query"}
 	calendarMultigetName = xml.Name{namespace, "calendar-multiget"}
+	freeBusyQueryName    = xml.Name{namespace, "free-busy-query"}
 
 	calendarColorName      = xml.Name{"http://apple.com/ns/ical/", "calendar-color"}
 	getCTagName            = xml.Name{"http://calendarserver.org/ns/", "getctag"}
@@ -225,7 +226,13 @@ type reportReq struct {
 	Query    *calendarQuery
 	Multiget *calendarMultiget
 	Sync     *internal.SyncCollectionQuery
-	// TODO: CALDAV:free-busy-query
+	FreeBusy *freeBusyQuery
+}
+
+// https://tools.ietf.org/html/rfc4791#section-7.10
+type freeBusyQuery struct {
+	XMLName   xml.Name   `xml:"urn:ietf:params:xml:ns:caldav free-busy-query"`
+	TimeRange *timeRange `xml:"time-range"`
 }
 
 func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
@@ -240,6 +247,9 @@ func (r *reportReq) UnmarshalXML(d *xml.Decoder, start xml.StartElement) error {
 	case syncCollectionName:
 		r.Sync = &internal.SyncCollectionQuery{}
 		v = r.Sync
+	case freeBusyQueryName:
+		r.FreeBusy = &freeBusyQuery{}
+		v = r.FreeBusy
 	default:
 		return fmt.Errorf("caldav: unsupported REPORT root %q %q", start.Name.Space, start.Name.Local)
 	}
