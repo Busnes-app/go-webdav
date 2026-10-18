@@ -143,6 +143,7 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) error {
 		return HTTPErrorf(http.StatusBadRequest, "webdav: unsupported request body")
 	}
 
+	// RFC 4918 §9.1: a missing Depth is infinity, which walks every resource, so it is refused.
 	depth := DepthInfinity
 	if s := r.Header.Get("Depth"); s != "" {
 		var err error
@@ -150,6 +151,10 @@ func (h *Handler) handlePropfind(w http.ResponseWriter, r *http.Request) error {
 		if err != nil {
 			return &HTTPError{http.StatusBadRequest, err}
 		}
+	}
+	if depth == DepthInfinity {
+		elem := NewRawXMLElement(xml.Name{Space: "DAV:", Local: "propfind-finite-depth"}, nil, nil)
+		return &HTTPError{Code: http.StatusForbidden, Err: &Error{Raw: []RawXMLValue{*elem}}}
 	}
 
 	ms, err := h.Backend.PropFind(r, &propfind, depth)

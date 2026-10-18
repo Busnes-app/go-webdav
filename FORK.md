@@ -3,6 +3,9 @@
 Upstream: github.com/emersion/go-webdav v0.7.0 (MIT, see LICENSE). Module path unchanged;
 KyCalendar wires it with a `replace` in its go.mod.
 Source of truth for review and upstreaming: github.com/Busnes-app/go-webdav (branch `kycalendar`).
+KyCalendar vendors this branch byte for byte (without `.github`) in `third_party/go-webdav` and
+pins the commit in `third_party/go-webdav.commit`; `scripts/check-fork-sync.sh` there fails on
+any difference. Land a change here first, then sync it into KyCalendar.
 
 Patches (each one is a candidate upstream PR):
 
@@ -14,3 +17,15 @@ Patches (each one is a candidate upstream PR):
    BYHOUR x BYMINUTE x BYSECOND exceeds 96 matches conservatively without expansion).
 6. calendar-multiget answers each distinct href once: every response holds a full object copy
    until the multistatus is written.
+7. Time-range matching guards rules rrule-go cannot bound (`stalls`, match.go): it checks UNTIL
+   only on a matching candidate, so BYSETPOS on HOURLY, MINUTELY or SECONDLY steps every period
+   to year 9999, and a step that never lands on its BYHOUR/BYMINUTE/BYSECOND clock loops forever.
+   Both match conservatively without expansion. Direct dependency on rrule-go v1.8.2.
+8. Non-recurring time-range matching follows RFC 4791 §9.9 exactly: `start < DTEND AND end >
+   DTSTART`, and a zero-length event matches at the range start.
+9. PROPFIND with `Depth: infinity`, or with no Depth (infinity per RFC 4918 §9.1), is 403 with
+   the `DAV:propfind-finite-depth` precondition.
+10. MKCALENDAR passes `supported-calendar-component-set` to the backend in
+    `Calendar.SupportedComponentSet`; the backend decides which sets it accepts.
+11. VTODO time-range matching follows RFC 4791 §9.9's VTODO table (DTSTART with DURATION or
+    DUE, DUE alone, COMPLETED and CREATED, else always).

@@ -5,6 +5,7 @@ import (
 	"time"
 
 	"github.com/emersion/go-ical"
+	"github.com/teambition/rrule-go"
 )
 
 // Filter returns the filtered list of calendar objects matching the provided query.
@@ -145,6 +146,69 @@ func wideTimeSet(comp *ical.Component) bool {
 	return n > maxTimeSet
 }
 
+// stalls reports a sub-daily rule one rrule-go next() could spend unbounded work on without
+// yielding: rrule-go checks UNTIL only on a matching candidate, so BYSETPOS on HOURLY, MINUTELY
+// or SECONDLY steps every period to year 9999, and a step that never lands on the BYHOUR,
+// BYMINUTE or BYSECOND clock loops forever. Day filters on any frequency end within a second.
+func stalls(comp *ical.Component, loc *time.Location) bool {
+	opt, err := comp.Props.RecurrenceRule()
+	if err != nil || opt == nil {
+		return false
+	}
+	unit := map[rrule.Frequency]int{rrule.HOURLY: 3600, rrule.MINUTELY: 60, rrule.SECONDLY: 1}[opt.Freq]
+	if unit == 0 {
+		return false
+	}
+	dtstart, err := comp.Props.DateTime(ical.PropDateTimeStart, loc)
+	if len(opt.Bysetpos) > 0 || err != nil {
+		return true
+	}
+	// Steps reach the seconds of the day congruent to DTSTART's modulo gcd(step, 86400).
+	const day = 86400
+	interval := opt.Interval
+	if interval < 1 {
+		interval = 1
+	}
+	g := gcd(interval%day*unit%day, day)
+	h0, m0, s0 := dtstart.Clock()
+	hours, minutes, seconds := orAll(opt.Byhour, 24), []int{m0}, []int{s0}
+	if opt.Freq != rrule.HOURLY {
+		minutes = orAll(opt.Byminute, 60)
+	}
+	if opt.Freq == rrule.SECONDLY {
+		seconds = orAll(opt.Bysecond, 60)
+	}
+	for _, h := range hours {
+		for _, m := range minutes {
+			for _, s := range seconds {
+				if ((h-h0)*3600+(m-m0)*60+s-s0)%g == 0 {
+					return false
+				}
+			}
+		}
+	}
+	return true
+}
+
+// orAll is set, or every value below n when set is empty.
+func orAll(set []int, n int) []int {
+	if len(set) > 0 {
+		return set
+	}
+	all := make([]int, n)
+	for i := range all {
+		all[i] = i
+	}
+	return all
+}
+
+func gcd(a, b int) int {
+	for b != 0 {
+		a, b = b, a%b
+	}
+	return a
+}
+
 func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
 	// See https://datatracker.ietf.org/doc/html/rfc4791#section-9.9
 
@@ -153,7 +217,7 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 	if err != nil {
 		return false, err
 	}
-	if rset != nil && wideTimeSet(comp) {
+	if rset != nil && (wideTimeSet(comp) || stalls(comp, start.Location())) {
 		return true, nil
 	}
 	if rset != nil {
@@ -175,7 +239,10 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return true, nil
 	}
 
-	// TODO handle more than just events
+	if comp.Name == ical.CompToDo {
+		return matchToDoTimeRange(start, end, comp)
+	}
+	// TODO handle more than events and tasks
 	if comp.Name != ical.CompEvent {
 		return false, nil
 	}
@@ -190,19 +257,73 @@ func matchCompTimeRange(start, end time.Time, comp *ical.Component) (bool, error
 		return false, err
 	}
 
-	// Event starts in time range
-	if eventStart.After(start) && (end.IsZero() || eventStart.Before(end)) {
-		return true, nil
+	// A zero-length event matches at the range start: (start <= DTSTART AND end > DTSTART).
+	startsBeforeEnd := end.IsZero() || eventStart.Before(end)
+	if eventEnd.Equal(eventStart) {
+		return !eventStart.Before(start) && startsBeforeEnd, nil
 	}
-	// Event ends in time range
-	if eventEnd.After(start) && (end.IsZero() || eventEnd.Before(end)) {
-		return true, nil
+	return eventEnd.After(start) && startsBeforeEnd, nil
+}
+
+// matchToDoTimeRange is RFC 4791 §9.9's VTODO table. A zero end is an open range.
+func matchToDoTimeRange(start, end time.Time, comp *ical.Component) (bool, error) {
+	at := func(name string) (time.Time, bool, error) {
+		p := comp.Props.Get(name)
+		if p == nil {
+			return time.Time{}, false, nil
+		}
+		t, err := p.DateTime(start.Location())
+		return t, true, err
 	}
-	// Event covers entire time range plus some
-	if eventStart.Before(start) && (!end.IsZero() && eventEnd.After(end)) {
-		return true, nil
+	dtstart, hasStart, err := at(ical.PropDateTimeStart)
+	if err != nil {
+		return false, err
 	}
-	return false, nil
+	due, hasDue, err := at(ical.PropDue)
+	if err != nil {
+		return false, err
+	}
+	completed, hasCompleted, err := at(ical.PropCompleted)
+	if err != nil {
+		return false, err
+	}
+	created, hasCreated, err := at(ical.PropCreated)
+	if err != nil {
+		return false, err
+	}
+	// before(t) is start <= t (or < when strict); after(t) is end > t (or >= when inclusive).
+	before := func(t time.Time, strict bool) bool {
+		return start.Before(t) || (!strict && start.Equal(t))
+	}
+	after := func(t time.Time, inclusive bool) bool {
+		return end.IsZero() || end.After(t) || (inclusive && end.Equal(t))
+	}
+	var dur *ical.Prop
+	if hasStart {
+		dur = comp.Props.Get(ical.PropDuration)
+	}
+	switch {
+	case dur != nil:
+		d, err := dur.Duration()
+		if err != nil {
+			return false, err
+		}
+		stop := dtstart.Add(d)
+		return before(stop, false) && (after(dtstart, false) || after(stop, true)), nil
+	case hasStart && hasDue:
+		return (before(due, true) || before(dtstart, false)) && (after(dtstart, false) || after(due, true)), nil
+	case hasStart:
+		return before(dtstart, false) && after(dtstart, false), nil
+	case hasDue:
+		return before(due, true) && after(due, true), nil
+	case hasCompleted && hasCreated:
+		return (before(created, false) || before(completed, false)) && (after(created, true) || after(completed, true)), nil
+	case hasCompleted:
+		return before(completed, false) && after(completed, true), nil
+	case hasCreated:
+		return after(created, false), nil
+	}
+	return true, nil
 }
 
 func matchPropTimeRange(start, end time.Time, field *ical.Prop) (bool, error) {
