@@ -3,6 +3,9 @@
 Upstream: github.com/emersion/go-webdav v0.7.0 (MIT, see LICENSE). Module path unchanged;
 KyCalendar wires it with a `replace` in its go.mod.
 Source of truth for review and upstreaming: github.com/Busnes-app/go-webdav (branch `kycalendar`).
+KyCalendar vendors this branch byte for byte (without `.github`) in `third_party/go-webdav` and
+pins the commit in `third_party/go-webdav.commit`; `scripts/check-fork-sync.sh` there fails on
+any difference. Land a change here first, then sync it into KyCalendar.
 
 Patches (each one is a candidate upstream PR):
 
