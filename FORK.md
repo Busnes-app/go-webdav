@@ -41,4 +41,5 @@ Patches (each one is a candidate upstream PR):
     `schedule-default-calendar-URL`); an outbox POST of a METHOD:REQUEST VFREEBUSY answers a
     `schedule-response` from ScheduleFreeBusy (409 `valid-scheduling-message` otherwise);
     `CalendarObject.ScheduleTag` is served as the Schedule-Tag header and `schedule-tag`
-    property, and PUT passes If-Schedule-Tag-Match to the backend.
+    property, and PUT passes If-Schedule-Tag-Match to the backend. `FreeBusyCalendar` (patch 12's
+    clip-and-merge renderer) is exported for backends building outbox replies.

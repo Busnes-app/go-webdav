@@ -200,7 +200,7 @@ func (h *Handler) handleFreeBusy(r *http.Request, w http.ResponseWriter, q *free
 		return err
 	}
 	var buf bytes.Buffer
-	if err := ical.NewEncoder(&buf).Encode(freeBusyCalendar(start, end, time.Now(), periods)); err != nil {
+	if err := ical.NewEncoder(&buf).Encode(FreeBusyCalendar(start, end, time.Now(), periods)); err != nil {
 		return err
 	}
 	w.Header().Set("Content-Type", ical.MIMEType)
@@ -208,9 +208,9 @@ func (h *Handler) handleFreeBusy(r *http.Request, w http.ResponseWriter, q *free
 	return err
 }
 
-// freeBusyCalendar renders periods as one VFREEBUSY over [start, end): clipped to the range,
+// FreeBusyCalendar renders periods as one VFREEBUSY over [start, end): clipped to the range,
 // merged per FBTYPE where they overlap or touch, and sorted.
-func freeBusyCalendar(start, end, stamp time.Time, periods []FreeBusyPeriod) *ical.Calendar {
+func FreeBusyCalendar(start, end, stamp time.Time, periods []FreeBusyPeriod) *ical.Calendar {
 	byType := map[string][]FreeBusyPeriod{}
 	for _, p := range periods {
 		if p.Type != FreeBusyTentative && p.Type != FreeBusyUnavailable {
