@@ -43,3 +43,7 @@ Patches (each one is a candidate upstream PR):
     `CalendarObject.ScheduleTag` is served as the Schedule-Tag header and `schedule-tag`
     property, and PUT passes If-Schedule-Tag-Match to the backend. `FreeBusyCalendar` (patch 12's
     clip-and-merge renderer) is exported for backends building outbox replies.
+14. PUT and outbox POST bodies with an iCalendar parameter value over 1 KiB are refused
+    (`valid-calendar-data`) before go-ical decodes them (`longParams`, caldav/params.go, which
+    reads lines, folds and parameters as go-ical's decoder does). go-ical builds parameter values
+    a byte at a time: one 512 KiB value inside a small body costs ~14 s of CPU.

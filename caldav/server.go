@@ -1049,6 +1049,9 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 	if b.MaxResourceSize > 0 && int64(len(raw)) > b.MaxResourceSize {
 		return NewPreconditionError(PreconditionMaxResourceSize)
 	}
+	if longParams(raw) {
+		return NewPreconditionError(PreconditionValidCalendarData)
+	}
 	cal, err := ical.NewDecoder(bytes.NewReader(raw)).Decode()
 	if err != nil {
 		return NewPreconditionError(PreconditionValidCalendarData)

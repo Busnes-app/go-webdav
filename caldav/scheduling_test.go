@@ -6,6 +6,7 @@ import (
 	"net/http/httptest"
 	"strings"
 	"testing"
+	"time"
 
 	"github.com/emersion/go-ical"
 )
@@ -204,5 +205,43 @@ func TestForkOutboxBodyCapped(t *testing.T) {
 	}
 	if w := do(t, h, "POST", "/user/calendars/_outbox/", ical.MIMEType, freeBusyRequest, nil); w.Code != 200 {
 		t.Fatalf("a normal request with no MaxResourceSize: %d", w.Code)
+	}
+}
+
+// A parameter value go-ical would decode in quadratic time is refused before decoding, even
+// inside the body cap, unfolded or folded, with no Content-Length; the backend is never asked.
+func TestForkOutboxRefusesLongParameters(t *testing.T) {
+	h, b := schedHandler(true)
+	long := strings.Repeat("A", 512<<10)
+	folded := strings.Repeat("A", 70) + strings.Repeat("\r\n "+strings.Repeat("A", 70), (512<<10)/70)
+	for name, cn := range map[string]string{"unfolded": long, "folded": folded} {
+		body := strings.Replace(freeBusyRequest, "ATTENDEE:mailto:bob@example.com", `ATTENDEE;CN="`+cn+`":mailto:bob@example.com`, 1)
+		req := httptest.NewRequest("POST", "/user/calendars/_outbox/", io.NopCloser(strings.NewReader(body)))
+		req.ContentLength = -1
+		req.Header.Set("Content-Type", ical.MIMEType)
+		w := httptest.NewRecorder()
+		start := time.Now()
+		h.ServeHTTP(w, req)
+		if w.Code != 409 || !strings.Contains(w.Body.String(), "valid-calendar-data") || b.gotReq != nil {
+			t.Errorf("%s: %d %s (backend asked: %v)", name, w.Code, w.Body.String(), b.gotReq != nil)
+		}
+		if d := time.Since(start); d > time.Second {
+			t.Errorf("%s: refusal took %v", name, d)
+		}
+	}
+	ok := strings.Replace(freeBusyRequest, "ATTENDEE:mailto:bob@example.com", `ATTENDEE;CN="`+strings.Repeat("A", 1<<10)+`":mailto:bob@example.com`, 1)
+	if w := do(t, h, "POST", "/user/calendars/_outbox/", ical.MIMEType, ok, nil); w.Code != 200 {
+		t.Errorf("a 1 KiB CN: %d", w.Code)
+	}
+}
+
+func TestForkPutRefusesLongParameters(t *testing.T) {
+	h, b := schedHandler(true)
+	body := "BEGIN:VCALENDAR\r\nVERSION:2.0\r\nPRODID:x\r\nBEGIN:VEVENT\r\nUID:a\r\nDTSTAMP:20261101T000000Z\r\nDTSTART:20261101T000000Z\r\n" +
+		`X-A;P="` + strings.Repeat("A", 512<<10) + "\":v\r\nEND:VEVENT\r\nEND:VCALENDAR\r\n"
+	start := time.Now()
+	w := do(t, h, "PUT", "/user/calendars/cal/a.ics", ical.MIMEType, body, nil)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "valid-calendar-data") || b.gotTag != "" || time.Since(start) > time.Second {
+		t.Fatalf("PUT %d %s in %v", w.Code, w.Body.String(), time.Since(start))
 	}
 }
