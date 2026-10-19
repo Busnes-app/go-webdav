@@ -80,6 +80,8 @@ type Calendar struct {
 	// ReadOnly reports that the current user may only read this calendar. It
 	// controls the DAV:current-user-privilege-set reported by the server.
 	ReadOnly bool
+	// Fork: served as schedule-calendar-transp (transparent when true) while scheduling is on.
+	ScheduleTransparent bool
 }
 
 type CalendarCompRequest struct {
@@ -143,6 +145,8 @@ type CalendarObject struct {
 	Data          *ical.Calendar
 	// Fork: when set, served byte-for-byte instead of re-encoding Data.
 	Raw []byte
+	// Fork: served as the Schedule-Tag header and schedule-tag property when set (RFC 6638 §3.2).
+	ScheduleTag string
 }
 
 // SyncQuery is the query struct represents a sync-collection request
