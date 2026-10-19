@@ -79,6 +79,8 @@ type Calendar struct {
 	SyncToken string
 	// Fork: current-user-privilege-set omits write when true.
 	ReadOnly bool
+	// Fork: served as schedule-calendar-transp (transparent when true) while scheduling is on.
+	ScheduleTransparent bool
 }
 
 type CalendarCompRequest struct {
@@ -142,6 +144,8 @@ type CalendarObject struct {
 	Data          *ical.Calendar
 	// Fork: when set, served byte-for-byte instead of re-encoding Data.
 	Raw []byte
+	// Fork: served as the Schedule-Tag header and schedule-tag property when set (RFC 6638 §3.2).
+	ScheduleTag string
 }
 
 // FreeBusyBackend is implemented by backends that answer the CALDAV:free-busy-query REPORT
