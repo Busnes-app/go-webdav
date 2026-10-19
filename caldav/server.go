@@ -30,6 +30,8 @@ type PutCalendarObjectOptions struct {
 	IfMatch webdav.ConditionalMatch
 	// Fork: the request body exactly as received.
 	Raw []byte
+	// Fork: the If-Schedule-Tag-Match header as received (RFC 6638 §3.2); "" when absent.
+	IfScheduleTagMatch string
 }
 
 // Backend is a CalDAV server backend.
@@ -77,6 +79,20 @@ func (h *Handler) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	}
 
 	var err error
+	if r.Method == http.MethodPost {
+		b := backend{Backend: h.Backend, Prefix: strings.TrimSuffix(h.Prefix, "/")}
+		s, serr := b.scheduling(r.Context())
+		if serr != nil {
+			internal.ServeError(w, serr)
+			return
+		}
+		if s != nil && r.URL.Path == s.OutboxPath {
+			if err := h.handleOutboxPost(w, r, s); err != nil {
+				internal.ServeError(w, err)
+			}
+			return
+		}
+	}
 	switch r.Method {
 	case "REPORT":
 		err = h.handleReport(w, r)
@@ -184,7 +200,7 @@ func (h *Handler) handleFreeBusy(r *http.Request, w http.ResponseWriter, q *free
 		return err
 	}
 	var buf bytes.Buffer
-	if err := ical.NewEncoder(&buf).Encode(freeBusyCalendar(start, end, time.Now(), periods)); err != nil {
+	if err := ical.NewEncoder(&buf).Encode(FreeBusyCalendar(start, end, time.Now(), periods)); err != nil {
 		return err
 	}
 	w.Header().Set("Content-Type", ical.MIMEType)
@@ -192,9 +208,9 @@ func (h *Handler) handleFreeBusy(r *http.Request, w http.ResponseWriter, q *free
 	return err
 }
 
-// freeBusyCalendar renders periods as one VFREEBUSY over [start, end): clipped to the range,
+// FreeBusyCalendar renders periods as one VFREEBUSY over [start, end): clipped to the range,
 // merged per FBTYPE where they overlap or touch, and sorted.
-func freeBusyCalendar(start, end, stamp time.Time, periods []FreeBusyPeriod) *ical.Calendar {
+func FreeBusyCalendar(start, end, stamp time.Time, periods []FreeBusyPeriod) *ical.Calendar {
 	byType := map[string][]FreeBusyPeriod{}
 	for _, p := range periods {
 		if p.Type != FreeBusyTentative && p.Type != FreeBusyUnavailable {
@@ -470,6 +486,19 @@ func (b *backend) resourceTypeAtPath(reqPath string) resourceType {
 
 func (b *backend) Options(r *http.Request) (caps []string, allow []string, err error) {
 	caps = []string{"calendar-access"}
+	s, sched, err := b.isScheduleCollection(r.Context(), r.URL.Path)
+	if err != nil {
+		return nil, nil, err
+	}
+	if s != nil {
+		caps = append(caps, "calendar-auto-schedule")
+	}
+	if sched {
+		if r.URL.Path == s.OutboxPath {
+			return caps, []string{http.MethodOptions, "PROPFIND", http.MethodPost}, nil
+		}
+		return caps, []string{http.MethodOptions, "PROPFIND"}, nil
+	}
 
 	if b.resourceTypeAtPath(r.URL.Path) != resourceTypeCalendarObject {
 		return caps, []string{http.MethodOptions, "PROPFIND", "PROPPATCH", "REPORT", "DELETE", "MKCOL", "MKCALENDAR"}, nil
@@ -511,6 +540,9 @@ func (b *backend) HeadGet(w http.ResponseWriter, r *http.Request) error {
 	}
 	if co.ETag != "" {
 		w.Header().Set("ETag", internal.ETag(co.ETag).String())
+	}
+	if co.ScheduleTag != "" {
+		w.Header().Set("Schedule-Tag", internal.ETag(co.ScheduleTag).String())
 	}
 	if !co.ModTime.IsZero() {
 		w.Header().Set("Last-Modified", co.ModTime.UTC().Format(http.TimeFormat))
@@ -586,6 +618,15 @@ func (b *backend) PropFind(r *http.Request, propfind *internal.PropFind, depth i
 			}
 		}
 	case resourceTypeCalendar:
+		if s, sched, err := b.isScheduleCollection(r.Context(), r.URL.Path); err != nil {
+			return nil, err
+		} else if sched {
+			resp, err := b.propFindScheduleCollection(r.Context(), propfind, s, r.URL.Path)
+			if err != nil {
+				return nil, err
+			}
+			return internal.NewMultiStatus(*resp), nil
+		}
 		ab, err := b.Backend.GetCalendar(r.Context(), r.URL.Path)
 		if err != nil {
 			return nil, err
@@ -651,6 +692,11 @@ func (b *backend) propFindUserPrincipal(ctx context.Context, propfind *internal.
 			Href: internal.Href{Path: homeSetPath},
 		}),
 		internal.ResourceTypeName: internal.PropFindValue(internal.NewResourceType(internal.CollectionName, internal.PrincipalName)),
+	}
+	if s, err := b.scheduling(ctx); err != nil {
+		return nil, err
+	} else if s != nil {
+		b.addPrincipalScheduling(props, s)
 	}
 	return internal.NewPropFindResponse(principalPath, propfind, props)
 }
@@ -739,6 +785,11 @@ func (b *backend) propFindCalendar(ctx context.Context, propfind *internal.PropF
 		reports = append(reports, syncCollectionName)
 	}
 	props[supportedReportSetName] = internal.PropFindValue(supportedReportSet(reports...))
+	if s, err := b.scheduling(ctx); err != nil {
+		return nil, err
+	} else if s != nil {
+		props[scheduleCalendarTranspName] = internal.PropFindValue(calendarTransp(cal.ScheduleTransparent))
+	}
 
 	// TODO: CALDAV:calendar-timezone, CALDAV:supported-calendar-component-set, CALDAV:min-date-time, CALDAV:max-date-time, CALDAV:max-instances, CALDAV:max-attendees-per-instance
 
@@ -810,6 +861,9 @@ func (b *backend) propFindCalendarObject(ctx context.Context, propfind *internal
 		props[internal.GetETagName] = internal.PropFindValue(&internal.GetETag{
 			ETag: internal.ETag(co.ETag),
 		})
+	}
+	if co.ScheduleTag != "" {
+		props[scheduleTagName] = internal.PropFindValue(scheduleTag(co.ScheduleTag))
 	}
 
 	return internal.NewPropFindResponse(co.Path, propfind, props)
@@ -970,8 +1024,9 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 	ifMatch := webdav.ConditionalMatch(r.Header.Get("If-Match"))
 
 	opts := PutCalendarObjectOptions{
-		IfNoneMatch: ifNoneMatch,
-		IfMatch:     ifMatch,
+		IfNoneMatch:        ifNoneMatch,
+		IfMatch:            ifMatch,
+		IfScheduleTagMatch: r.Header.Get("If-Schedule-Tag-Match"),
 	}
 
 	t, _, err := mime.ParseMediaType(r.Header.Get("Content-Type"))
@@ -994,6 +1049,9 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 	if b.MaxResourceSize > 0 && int64(len(raw)) > b.MaxResourceSize {
 		return NewPreconditionError(PreconditionMaxResourceSize)
 	}
+	if longParams(raw) {
+		return NewPreconditionError(PreconditionValidCalendarData)
+	}
 	cal, err := ical.NewDecoder(bytes.NewReader(raw)).Decode()
 	if err != nil {
 		return NewPreconditionError(PreconditionValidCalendarData)
@@ -1007,6 +1065,9 @@ func (b *backend) Put(w http.ResponseWriter, r *http.Request) error {
 
 	if co.ETag != "" {
 		w.Header().Set("ETag", internal.ETag(co.ETag).String())
+	}
+	if co.ScheduleTag != "" {
+		w.Header().Set("Schedule-Tag", internal.ETag(co.ScheduleTag).String())
 	}
 	if !co.ModTime.IsZero() {
 		w.Header().Set("Last-Modified", co.ModTime.UTC().Format(http.TimeFormat))
@@ -1073,6 +1134,7 @@ const (
 	PreconditionMaxDateTime                  PreconditionType = "max-date-time"
 	PreconditionMaxInstances                 PreconditionType = "max-instances"
 	PreconditionMaxAttendeesPerInstance      PreconditionType = "max-attendees-per-instance"
+	PreconditionValidSchedulingMessage       PreconditionType = "valid-scheduling-message"
 )
 
 func NewPreconditionError(err PreconditionType) error {

@@ -33,3 +33,17 @@ Patches (each one is a candidate upstream PR):
     returns busy periods only; the handler clips them to the range, merges them per FBTYPE and
     renders one VFREEBUSY, so no event data reaches the reply. Calendar collections only;
     advertised in supported-report-set only when the backend implements it.
+13. CalDAV scheduling surface (RFC 6638) through an optional SchedulingBackend whose
+    Scheduling(ctx) returns nil when off; off, nothing below is advertised or served and a POST
+    is answered as before. On: OPTIONS adds `calendar-auto-schedule`; the principal serves
+    `calendar-user-address-set`, `schedule-inbox-URL` and `schedule-outbox-URL`; calendars serve
+    `schedule-calendar-transp`; the inbox and outbox answer PROPFIND (resource type, privileges,
+    `schedule-default-calendar-URL`); an outbox POST of a METHOD:REQUEST VFREEBUSY answers a
+    `schedule-response` from ScheduleFreeBusy (409 `valid-scheduling-message` otherwise);
+    `CalendarObject.ScheduleTag` is served as the Schedule-Tag header and `schedule-tag`
+    property, and PUT passes If-Schedule-Tag-Match to the backend. `FreeBusyCalendar` (patch 12's
+    clip-and-merge renderer) is exported for backends building outbox replies.
+14. PUT and outbox POST bodies with an iCalendar parameter value over 1 KiB are refused
+    (`valid-calendar-data`) before go-ical decodes them (`longParams`, caldav/params.go, which
+    reads lines, folds and parameters as go-ical's decoder does). go-ical builds parameter values
+    a byte at a time: one 512 KiB value inside a small body costs ~14 s of CPU.
