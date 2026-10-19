@@ -163,6 +163,9 @@ func (h *Handler) handleOutboxPost(w http.ResponseWriter, r *http.Request, s *Sc
 	if int64(len(raw)) > limit {
 		return NewPreconditionError(PreconditionMaxResourceSize)
 	}
+	if longParams(raw) {
+		return NewPreconditionError(PreconditionValidCalendarData)
+	}
 	cal, err := ical.NewDecoder(bytes.NewReader(raw)).Decode()
 	if err != nil {
 		return NewPreconditionError(PreconditionValidCalendarData)
