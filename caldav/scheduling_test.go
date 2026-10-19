@@ -188,3 +188,21 @@ func TestForkScheduleTag(t *testing.T) {
 		t.Errorf("no tag set, header %q", tag)
 	}
 }
+
+// The outbox body is capped like a PUT: MaxResourceSize, else 1 MiB, before anything decodes it.
+func TestForkOutboxBodyCapped(t *testing.T) {
+	h, b := schedHandler(true)
+	h.MaxResourceSize = 64
+	w := do(t, h, "POST", "/user/calendars/_outbox/", ical.MIMEType, freeBusyRequest, nil)
+	if w.Code != 409 || !strings.Contains(w.Body.String(), "max-resource-size") || b.gotReq != nil {
+		t.Fatalf("over MaxResourceSize: %d %s (backend asked: %v)", w.Code, w.Body.String(), b.gotReq != nil)
+	}
+	h.MaxResourceSize = 0
+	huge := strings.Replace(freeBusyRequest, "END:VFREEBUSY", strings.Repeat("ATTENDEE:mailto:x@example.com\r\n", 40000)+"END:VFREEBUSY", 1)
+	if w := do(t, h, "POST", "/user/calendars/_outbox/", ical.MIMEType, huge, nil); w.Code != 409 || !strings.Contains(w.Body.String(), "max-resource-size") {
+		t.Fatalf("over the 1 MiB default: %d", w.Code)
+	}
+	if w := do(t, h, "POST", "/user/calendars/_outbox/", ical.MIMEType, freeBusyRequest, nil); w.Code != 200 {
+		t.Fatalf("a normal request with no MaxResourceSize: %d", w.Code)
+	}
+}

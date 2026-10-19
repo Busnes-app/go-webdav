@@ -4,6 +4,7 @@ import (
 	"bytes"
 	"context"
 	"encoding/xml"
+	"io"
 	"mime"
 	"net/http"
 	"strings"
@@ -141,13 +142,28 @@ type scheduleResponseItem struct {
 	CalendarData  string  `xml:"urn:ietf:params:xml:ns:caldav calendar-data,omitempty"`
 }
 
+// maxOutboxBody caps an outbox POST when the handler sets no MaxResourceSize: a free/busy
+// request is a few hundred bytes per attendee.
+const maxOutboxBody = 1 << 20
+
 // handleOutboxPost answers a VFREEBUSY request POSTed to the outbox (RFC 6638 §5).
 func (h *Handler) handleOutboxPost(w http.ResponseWriter, r *http.Request, s *Scheduling) error {
 	sb := h.Backend.(SchedulingBackend)
 	if t, _, err := mime.ParseMediaType(r.Header.Get("Content-Type")); err != nil || t != ical.MIMEType {
 		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: outbox POST needs text/calendar")
 	}
-	cal, err := ical.NewDecoder(r.Body).Decode()
+	limit := h.MaxResourceSize
+	if limit <= 0 {
+		limit = maxOutboxBody
+	}
+	raw, err := io.ReadAll(io.LimitReader(r.Body, limit+1))
+	if err != nil {
+		return internal.HTTPErrorf(http.StatusBadRequest, "caldav: failed to read body: %v", err)
+	}
+	if int64(len(raw)) > limit {
+		return NewPreconditionError(PreconditionMaxResourceSize)
+	}
+	cal, err := ical.NewDecoder(bytes.NewReader(raw)).Decode()
 	if err != nil {
 		return NewPreconditionError(PreconditionValidCalendarData)
 	}
