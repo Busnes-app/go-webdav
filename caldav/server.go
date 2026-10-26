@@ -1147,11 +1147,3 @@ func NewPreconditionError(err PreconditionType) error {
 		},
 	}
 }
-
-func calendarPrivileges(readOnly bool) *internal.CurrentUserPrivilegeSet {
-	privs := []internal.Privilege{{Read: &struct{}{}}}
-	if !readOnly {
-		privs = append(privs, internal.Privilege{Write: &struct{}{}})
-	}
-	return &internal.CurrentUserPrivilegeSet{Privilege: privs}
-}
