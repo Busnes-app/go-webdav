@@ -2,12 +2,27 @@
 
 Upstream: github.com/emersion/go-webdav v0.7.0 (MIT, see LICENSE). Module path unchanged;
 KyCalendar wires it with a `replace` in its go.mod.
-Source of truth for review and upstreaming: github.com/Busnes-app/go-webdav (branch `kycalendar`).
+Source of truth: github.com/Busnes-app/go-webdav (branch `kycalendar`).
 KyCalendar vendors this branch byte for byte (without `.github`) in `third_party/go-webdav` and
 pins the commit in `third_party/go-webdav.commit`; `scripts/check-fork-sync.sh` there fails on
 any difference. Land a change here first, then sync it into KyCalendar.
 
-Patches (each one is a candidate upstream PR):
+## AI/LLM provenance
+
+The CalDAV patches in this fork were written with large-language-model assistance and
+autonomous coding agents; the git history discloses this (`Co-Authored-By` trailers).
+They are **deliberately not submitted to emersion/go-webdav**: its contribution guidelines
+ask for human-authored, non-autonomous, DCO-signed patches, and these do not meet that bar.
+This repository exists so the code is available to anyone who wants it, and so KyCalendar has
+a stable base to vendor. Provided as-is under the MIT license (see `LICENSE`).
+
+**De-fork policy.** The fork tracks upstream and shrinks over time: when upstream ships an
+equivalent of a patch below, that patch is dropped here and the fork rebased onto the newer
+upstream. (Upstream has since added a read-only `current-user-privilege-set`, overlapping the
+privilege half of patch 1 — the first de-fork candidate.)
+
+Patches below are documented for transparency; they are **not** being submitted
+upstream (see AI/LLM provenance) and each is de-forked when upstream ships an equivalent:
 
 1. Calendar colour, getctag, sync-token, supported-report-set and per-calendar read-only privileges.
 2. Raw iCalendar bytes on PUT and GET; max-resource-size precondition.
