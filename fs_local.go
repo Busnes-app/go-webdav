@@ -22,11 +22,21 @@ type LocalFileSystem string
 
 var _ FileSystem = LocalFileSystem("")
 
+// Bounds on a request path, so each lookup and the per-ancestor checks in
+// copyMovePaths stay cheap. maxPathLen is Linux's PATH_MAX.
+const (
+	maxPathLen   = 4096
+	maxPathDepth = 256
+)
+
 // localPath maps an absolute WebDAV path to a slash-separated name relative to
 // the root.
 func localPath(name string) (string, error) {
 	if (filepath.Separator != '/' && strings.IndexRune(name, filepath.Separator) >= 0) || strings.Contains(name, "\x00") {
 		return "", internal.HTTPErrorf(http.StatusBadRequest, "webdav: invalid character in path")
+	}
+	if len(name) > maxPathLen || strings.Count(name, "/") > maxPathDepth {
+		return "", internal.HTTPErrorf(http.StatusBadRequest, "webdav: path too long or too deep")
 	}
 	name = path.Clean(name)
 	if !path.IsAbs(name) {
@@ -298,16 +308,21 @@ func copyMovePaths(r *os.Root, src, dst string) (string, string, error) {
 		return "", "", errFromOS(err)
 	}
 	for p := dstPath; ; p = path.Dir(p) {
-		if fi, err := r.Stat(p); err == nil && os.SameFile(fi, srcInfo) {
+		fi, err := r.Lstat(p)
+		if err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			if p != dstPath {
+				return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination path crosses a symlink")
+			}
+			fi, err = r.Stat(p)
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", "", errFromOS(err)
+		}
+		if err == nil && os.SameFile(fi, srcInfo) {
 			return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination is the source or inside it")
 		}
 		if p == "." {
 			return srcPath, dstPath, nil
-		}
-		if p != dstPath {
-			if fi, err := r.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
-				return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination path crosses a symlink")
-			}
 		}
 	}
 }

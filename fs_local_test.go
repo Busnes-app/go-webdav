@@ -166,3 +166,30 @@ func httpStatus(err error) int {
 	}
 	return 0
 }
+
+func TestLocalFileSystemPathLimits(t *testing.T) {
+	ctx := context.Background()
+	local, _ := newLocalFS(t)
+
+	long := "/" + strings.Repeat("a", maxPathLen)
+	deep := strings.Repeat("/a", maxPathDepth+1)
+	for _, dst := range []string{long, deep} {
+		_, err := local.Copy(ctx, "/dir", dst, &CopyOptions{})
+		if code := httpStatus(err); code != http.StatusBadRequest {
+			t.Errorf("Copy to a %d-byte path: status %v, want 400", len(dst), code)
+		}
+		_, err = local.Move(ctx, "/dir", dst, &MoveOptions{})
+		if code := httpStatus(err); code != http.StatusBadRequest {
+			t.Errorf("Move to a %d-byte path: status %v, want 400", len(dst), code)
+		}
+	}
+	if _, err := local.Stat(ctx, "/a"); err == nil {
+		t.Error("refused copy or move created /a")
+	}
+
+	// At the limit is allowed; the missing parents make it a 409 or 404, not a 400.
+	_, err := local.Copy(ctx, "/dir", strings.Repeat("/a", maxPathDepth), &CopyOptions{})
+	if code := httpStatus(err); code == http.StatusBadRequest {
+		t.Errorf("Copy to a path at the depth limit: %v", err)
+	}
+}

@@ -67,4 +67,4 @@ upstream (see AI/LLM provenance) and each is de-forked when upstream ships an eq
     deleted the source first), MOVE of a missing source no longer deletes the destination, and
     a recursive COPY copies each entry instead of the top directory over and over. A COPY or
     MOVE destination whose path crosses a symlinked directory is 403, so a link cannot hide
-    that the destination is inside the source.
+    that the destination is inside the source. Paths over 4096 bytes or 256 levels are 400.
