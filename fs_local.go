@@ -16,36 +16,58 @@ import (
 	"github.com/emersion/go-webdav/internal"
 )
 
-// LocalFileSystem implements FileSystem for a local directory.
+// LocalFileSystem implements FileSystem for a local directory. Every access
+// goes through os.Root, so neither ".." nor a symlink can reach outside it.
 type LocalFileSystem string
 
 var _ FileSystem = LocalFileSystem("")
 
-func (fs LocalFileSystem) localPath(name string) (string, error) {
+// Bounds on a request path, so each lookup and the per-ancestor checks in
+// copyMovePaths stay cheap. maxPathLen is Linux's PATH_MAX.
+const (
+	maxPathLen   = 4096
+	maxPathDepth = 256
+)
+
+// localPath maps an absolute WebDAV path to a slash-separated name relative to
+// the root.
+func localPath(name string) (string, error) {
 	if (filepath.Separator != '/' && strings.IndexRune(name, filepath.Separator) >= 0) || strings.Contains(name, "\x00") {
 		return "", internal.HTTPErrorf(http.StatusBadRequest, "webdav: invalid character in path")
+	}
+	if len(name) > maxPathLen || strings.Count(name, "/") > maxPathDepth {
+		return "", internal.HTTPErrorf(http.StatusBadRequest, "webdav: path too long or too deep")
 	}
 	name = path.Clean(name)
 	if !path.IsAbs(name) {
 		return "", internal.HTTPErrorf(http.StatusBadRequest, "webdav: expected absolute path, got %q", name)
 	}
-	return filepath.Join(string(fs), filepath.FromSlash(name)), nil
-}
-
-func (fs LocalFileSystem) externalPath(name string) (string, error) {
-	rel, err := filepath.Rel(string(fs), name)
-	if err != nil {
-		return "", err
+	if name == "/" {
+		return ".", nil
 	}
-	return "/" + filepath.ToSlash(rel), nil
+	return name[1:], nil
 }
 
-func (fs LocalFileSystem) Open(ctx context.Context, name string) (io.ReadCloser, error) {
-	p, err := fs.localPath(name)
+func (local LocalFileSystem) openRoot() (*os.Root, error) {
+	r, err := os.OpenRoot(string(local))
+	return r, errFromOS(err)
+}
+
+func (local LocalFileSystem) Open(ctx context.Context, name string) (io.ReadCloser, error) {
+	p, err := localPath(name)
 	if err != nil {
 		return nil, err
 	}
-	return os.Open(p)
+	r, err := local.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	f, err := r.Open(p)
+	if err != nil {
+		return nil, errFromOS(err)
+	}
+	return f, nil
 }
 
 func fileInfoFromOS(p string, fi os.FileInfo) *FileInfo {
@@ -71,6 +93,10 @@ func errFromOS(err error) error {
 	if errors.As(err, &perr) {
 		err = fmt.Errorf("%s: %w", perr.Op, perr.Err)
 	}
+	var lerr *os.LinkError
+	if errors.As(err, &lerr) {
+		err = fmt.Errorf("%s: %w", lerr.Op, lerr.Err)
+	}
 
 	if errors.Is(err, fs.ErrNotExist) {
 		return NewHTTPError(http.StatusNotFound, err)
@@ -83,42 +109,51 @@ func errFromOS(err error) error {
 	}
 }
 
-func (fs LocalFileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) {
-	p, err := fs.localPath(name)
+func (local LocalFileSystem) Stat(ctx context.Context, name string) (*FileInfo, error) {
+	p, err := localPath(name)
 	if err != nil {
 		return nil, err
 	}
-	fi, err := os.Stat(p)
+	r, err := local.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
+	fi, err := r.Stat(p)
 	if err != nil {
 		return nil, errFromOS(err)
 	}
 	return fileInfoFromOS(name, fi), nil
 }
 
-func (fs LocalFileSystem) ReadDir(ctx context.Context, name string, recursive bool) ([]FileInfo, error) {
-	path, err := fs.localPath(name)
+func (local LocalFileSystem) ReadDir(ctx context.Context, name string, recursive bool) ([]FileInfo, error) {
+	dir, err := localPath(name)
 	if err != nil {
 		return nil, err
 	}
+	r, err := local.openRoot()
+	if err != nil {
+		return nil, err
+	}
+	defer r.Close()
 
 	var l []FileInfo
-	err = filepath.Walk(path, func(p string, fi os.FileInfo, err error) error {
-		if err != nil && !errors.Is(err, os.ErrPermission) {
+	err = fs.WalkDir(r.FS(), dir, func(p string, d fs.DirEntry, err error) error {
+		if err != nil {
+			if errors.Is(err, fs.ErrPermission) {
+				return nil
+			}
 			return err
 		}
-		if fi == nil {
-			return nil
-		}
-
-		href, err := fs.externalPath(p)
+		fi, err := d.Info()
 		if err != nil {
 			return err
 		}
 
-		l = append(l, *fileInfoFromOS(href, fi))
+		l = append(l, *fileInfoFromOS(path.Join("/", p), fi))
 
-		if !recursive && fi.IsDir() && path != p {
-			return filepath.SkipDir
+		if !recursive && fi.IsDir() && dir != p {
+			return fs.SkipDir
 		}
 		return nil
 	})
@@ -150,34 +185,39 @@ func checkConditionalMatches(fi *FileInfo, ifMatch, ifNoneMatch ConditionalMatch
 	return nil
 }
 
-func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadCloser, opts *CreateOptions) (fi *FileInfo, created bool, err error) {
-	p, err := fs.localPath(name)
+func (local LocalFileSystem) Create(ctx context.Context, name string, body io.ReadCloser, opts *CreateOptions) (fi *FileInfo, created bool, err error) {
+	p, err := localPath(name)
 	if err != nil {
 		return nil, false, err
 	}
-	fi, _ = fs.Stat(ctx, name)
+	r, err := local.openRoot()
+	if err != nil {
+		return nil, false, err
+	}
+	defer r.Close()
+	fi, _ = local.Stat(ctx, name)
 	created = fi == nil
 
 	if err := checkConditionalMatches(fi, opts.IfMatch, opts.IfNoneMatch); err != nil {
 		return nil, false, err
 	}
 
-	wc, err := os.Create(p)
+	wc, err := r.Create(p)
 	if err != nil {
 		return nil, false, errFromOS(err)
 	}
 	defer wc.Close()
 
 	if _, err := io.Copy(wc, body); err != nil {
-		os.Remove(p)
+		r.Remove(p)
 		return nil, false, err
 	}
 	if err := wc.Close(); err != nil {
-		os.Remove(p)
+		r.Remove(p)
 		return nil, false, err
 	}
 
-	fi, err = fs.Stat(ctx, name)
+	fi, err = local.Stat(ctx, name)
 	if err != nil {
 		return nil, false, err
 	}
@@ -185,15 +225,20 @@ func (fs LocalFileSystem) Create(ctx context.Context, name string, body io.ReadC
 	return fi, created, err
 }
 
-func (fs LocalFileSystem) RemoveAll(ctx context.Context, name string, opts *RemoveAllOptions) error {
-	p, err := fs.localPath(name)
+func (local LocalFileSystem) RemoveAll(ctx context.Context, name string, opts *RemoveAllOptions) error {
+	p, err := localPath(name)
 	if err != nil {
 		return err
 	}
+	r, err := local.openRoot()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
 
 	// WebDAV semantics are that it should return a "404 Not Found" error in
 	// case the resource doesn't exist. We need to Stat before RemoveAll.
-	fi, err := fs.Stat(ctx, name)
+	fi, err := local.Stat(ctx, name)
 	if err != nil {
 		return errFromOS(err)
 	}
@@ -202,29 +247,34 @@ func (fs LocalFileSystem) RemoveAll(ctx context.Context, name string, opts *Remo
 		return err
 	}
 
-	return errFromOS(os.RemoveAll(p))
+	return errFromOS(r.RemoveAll(p))
 }
 
-func (fs LocalFileSystem) Mkdir(ctx context.Context, name string) error {
-	p, err := fs.localPath(name)
+func (local LocalFileSystem) Mkdir(ctx context.Context, name string) error {
+	p, err := localPath(name)
 	if err != nil {
 		return err
 	}
-	if err := os.Mkdir(p, 0755); os.IsExist(err) {
+	r, err := local.openRoot()
+	if err != nil {
+		return err
+	}
+	defer r.Close()
+	if err := r.Mkdir(p, 0755); os.IsExist(err) {
 		return NewHTTPError(http.StatusMethodNotAllowed, err)
 	} else {
 		return errFromOS(err)
 	}
 }
 
-func copyRegularFile(src, dst string, perm os.FileMode) error {
-	srcFile, err := os.Open(src)
+func copyRegularFile(r *os.Root, src, dst string, perm os.FileMode) error {
+	srcFile, err := r.Open(src)
 	if err != nil {
 		return errFromOS(err)
 	}
 	defer srcFile.Close()
 
-	dstFile, err := os.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
+	dstFile, err := r.OpenFile(dst, os.O_RDWR|os.O_CREATE|os.O_TRUNC, perm)
 	if os.IsNotExist(err) {
 		return NewHTTPError(http.StatusConflict, err)
 	} else if err != nil {
@@ -239,56 +289,98 @@ func copyRegularFile(src, dst string, perm os.FileMode) error {
 	return dstFile.Close()
 }
 
-func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *CopyOptions) (created bool, err error) {
-	srcPath, err := fs.localPath(src)
+// copyMovePaths resolves src and dst and refuses a destination that is the
+// source or inside it: replacing it would delete the source first, and a
+// recursive copy into itself never ends. Refusing symlinked directories in
+// dst's path makes its lexical ancestors its real ones, so comparing their
+// file identity with src catches every alias.
+func copyMovePaths(r *os.Root, src, dst string) (string, string, error) {
+	srcPath, err := localPath(src)
 	if err != nil {
-		return false, err
+		return "", "", err
 	}
-	dstPath, err := fs.localPath(dst)
+	dstPath, err := localPath(dst)
 	if err != nil {
-		return false, err
+		return "", "", err
 	}
-
-	// TODO: "Note that an infinite-depth COPY of /A/ into /A/B/ could lead to
-	// infinite recursion if not handled correctly"
-
-	srcInfo, err := os.Stat(srcPath)
+	srcInfo, err := r.Stat(srcPath)
 	if err != nil {
-		return false, errFromOS(err)
+		return "", "", errFromOS(err)
 	}
-	srcPerm := srcInfo.Mode() & os.ModePerm
+	for p := dstPath; ; p = path.Dir(p) {
+		fi, err := r.Lstat(p)
+		if err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+			if p != dstPath {
+				return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination path crosses a symlink")
+			}
+			fi, err = r.Stat(p)
+		}
+		if err != nil && !errors.Is(err, fs.ErrNotExist) {
+			return "", "", errFromOS(err)
+		}
+		if err == nil && os.SameFile(fi, srcInfo) {
+			return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination is the source or inside it")
+		}
+		if p == "." {
+			return srcPath, dstPath, nil
+		}
+	}
+}
 
-	if _, err := os.Stat(dstPath); err != nil {
+// prepareDestination reports whether dst is new, removing it if it exists and
+// may be overwritten.
+func prepareDestination(r *os.Root, dst string, noOverwrite bool) (created bool, err error) {
+	if _, err := r.Stat(dst); err != nil {
 		if !os.IsNotExist(err) {
 			return false, errFromOS(err)
 		}
-		created = true
-	} else {
-		if options.NoOverwrite {
-			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
-		}
-		if err := os.RemoveAll(dstPath); err != nil {
-			return false, errFromOS(err)
-		}
+		return true, nil
+	}
+	if noOverwrite {
+		return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
+	}
+	return false, errFromOS(r.RemoveAll(dst))
+}
+
+func (local LocalFileSystem) Copy(ctx context.Context, src, dst string, options *CopyOptions) (created bool, err error) {
+	r, err := local.openRoot()
+	if err != nil {
+		return false, err
+	}
+	defer r.Close()
+
+	srcPath, dstPath, err := copyMovePaths(r, src, dst)
+	if err != nil {
+		return false, err
+	}
+	created, err = prepareDestination(r, dstPath, options.NoOverwrite)
+	if err != nil {
+		return false, err
 	}
 
-	err = filepath.Walk(srcPath, func(p string, fi os.FileInfo, err error) error {
+	err = fs.WalkDir(r.FS(), srcPath, func(p string, d fs.DirEntry, err error) error {
 		if err != nil {
 			return err
 		}
+		fi, err := d.Info()
+		if err != nil {
+			return err
+		}
+		target := dstPath + strings.TrimPrefix(p, srcPath)
+		perm := fi.Mode() & os.ModePerm
 
 		if fi.IsDir() {
-			if err := os.Mkdir(dstPath, srcPerm); err != nil {
+			if err := r.Mkdir(target, perm); err != nil {
 				return errFromOS(err)
 			}
 		} else {
-			if err := copyRegularFile(srcPath, dstPath, srcPerm); err != nil {
+			if err := copyRegularFile(r, p, target, perm); err != nil {
 				return err
 			}
 		}
 
 		if fi.IsDir() && options.NoRecursive {
-			return filepath.SkipDir
+			return fs.SkipDir
 		}
 		return nil
 	})
@@ -299,31 +391,23 @@ func (fs LocalFileSystem) Copy(ctx context.Context, src, dst string, options *Co
 	return created, nil
 }
 
-func (fs LocalFileSystem) Move(ctx context.Context, src, dst string, options *MoveOptions) (created bool, err error) {
-	srcPath, err := fs.localPath(src)
+func (local LocalFileSystem) Move(ctx context.Context, src, dst string, options *MoveOptions) (created bool, err error) {
+	r, err := local.openRoot()
 	if err != nil {
 		return false, err
 	}
-	dstPath, err := fs.localPath(dst)
+	defer r.Close()
+
+	srcPath, dstPath, err := copyMovePaths(r, src, dst)
+	if err != nil {
+		return false, err
+	}
+	created, err = prepareDestination(r, dstPath, options.NoOverwrite)
 	if err != nil {
 		return false, err
 	}
 
-	if _, err := os.Stat(dstPath); err != nil {
-		if !os.IsNotExist(err) {
-			return false, errFromOS(err)
-		}
-		created = true
-	} else {
-		if options.NoOverwrite {
-			return false, NewHTTPError(http.StatusPreconditionFailed, os.ErrExist)
-		}
-		if err := os.RemoveAll(dstPath); err != nil {
-			return false, errFromOS(err)
-		}
-	}
-
-	if err := os.Rename(srcPath, dstPath); err != nil {
+	if err := r.Rename(srcPath, dstPath); err != nil {
 		return false, errFromOS(err)
 	}
 
