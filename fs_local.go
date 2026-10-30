@@ -279,10 +279,11 @@ func copyRegularFile(r *os.Root, src, dst string, perm os.FileMode) error {
 	return dstFile.Close()
 }
 
-// copyMovePaths resolves src and dst and refuses a destination equal to or
-// inside the source: replacing it would delete the source first, and a
-// recursive copy into itself never ends.
-func copyMovePaths(src, dst string) (string, string, error) {
+// copyMovePaths resolves src and dst and refuses a destination that is the
+// source or inside it: replacing it would delete the source first, and a
+// recursive copy into itself never ends. Comparing file identity of dst and
+// each ancestor catches aliases through symlinks, which path strings miss.
+func copyMovePaths(r *os.Root, src, dst string) (string, string, error) {
 	srcPath, err := localPath(src)
 	if err != nil {
 		return "", "", err
@@ -291,10 +292,18 @@ func copyMovePaths(src, dst string) (string, string, error) {
 	if err != nil {
 		return "", "", err
 	}
-	if srcPath == "." || srcPath == dstPath || strings.HasPrefix(dstPath, srcPath+"/") {
-		return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination is the source or inside it")
+	srcInfo, err := r.Stat(srcPath)
+	if err != nil {
+		return "", "", errFromOS(err)
 	}
-	return srcPath, dstPath, nil
+	for p := dstPath; ; p = path.Dir(p) {
+		if fi, err := r.Stat(p); err == nil && os.SameFile(fi, srcInfo) {
+			return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination is the source or inside it")
+		}
+		if p == "." {
+			return srcPath, dstPath, nil
+		}
+	}
 }
 
 // prepareDestination reports whether dst is new, removing it if it exists and
@@ -313,18 +322,15 @@ func prepareDestination(r *os.Root, dst string, noOverwrite bool) (created bool,
 }
 
 func (local LocalFileSystem) Copy(ctx context.Context, src, dst string, options *CopyOptions) (created bool, err error) {
-	srcPath, dstPath, err := copyMovePaths(src, dst)
-	if err != nil {
-		return false, err
-	}
 	r, err := local.openRoot()
 	if err != nil {
 		return false, err
 	}
 	defer r.Close()
 
-	if _, err := r.Stat(srcPath); err != nil {
-		return false, errFromOS(err)
+	srcPath, dstPath, err := copyMovePaths(r, src, dst)
+	if err != nil {
+		return false, err
 	}
 	created, err = prepareDestination(r, dstPath, options.NoOverwrite)
 	if err != nil {
@@ -365,18 +371,15 @@ func (local LocalFileSystem) Copy(ctx context.Context, src, dst string, options 
 }
 
 func (local LocalFileSystem) Move(ctx context.Context, src, dst string, options *MoveOptions) (created bool, err error) {
-	srcPath, dstPath, err := copyMovePaths(src, dst)
-	if err != nil {
-		return false, err
-	}
 	r, err := local.openRoot()
 	if err != nil {
 		return false, err
 	}
 	defer r.Close()
 
-	if _, err := r.Stat(srcPath); err != nil {
-		return false, errFromOS(err)
+	srcPath, dstPath, err := copyMovePaths(r, src, dst)
+	if err != nil {
+		return false, err
 	}
 	created, err = prepareDestination(r, dstPath, options.NoOverwrite)
 	if err != nil {
