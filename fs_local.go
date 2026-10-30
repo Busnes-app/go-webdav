@@ -281,8 +281,9 @@ func copyRegularFile(r *os.Root, src, dst string, perm os.FileMode) error {
 
 // copyMovePaths resolves src and dst and refuses a destination that is the
 // source or inside it: replacing it would delete the source first, and a
-// recursive copy into itself never ends. Comparing file identity of dst and
-// each ancestor catches aliases through symlinks, which path strings miss.
+// recursive copy into itself never ends. Refusing symlinked directories in
+// dst's path makes its lexical ancestors its real ones, so comparing their
+// file identity with src catches every alias.
 func copyMovePaths(r *os.Root, src, dst string) (string, string, error) {
 	srcPath, err := localPath(src)
 	if err != nil {
@@ -302,6 +303,11 @@ func copyMovePaths(r *os.Root, src, dst string) (string, string, error) {
 		}
 		if p == "." {
 			return srcPath, dstPath, nil
+		}
+		if p != dstPath {
+			if fi, err := r.Lstat(p); err == nil && fi.Mode()&fs.ModeSymlink != 0 {
+				return "", "", internal.HTTPErrorf(http.StatusForbidden, "webdav: destination path crosses a symlink")
+			}
 		}
 	}
 }

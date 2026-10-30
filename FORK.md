@@ -63,6 +63,8 @@ upstream (see AI/LLM provenance) and each is de-forked when upstream ships an eq
     reads lines, folds and parameters as go-ical's decoder does). go-ical builds parameter values
     a byte at a time: one 512 KiB value inside a small body costs ~14 s of CPU.
 15. `LocalFileSystem` opens its directory as an `os.Root` (go 1.25), so a symlink inside it no
-    longer reaches outside; COPY or MOVE onto the source or into it, even through a symlink, is 403 (the overwrite
+    longer reaches outside; COPY or MOVE onto the source or into it is 403 (the overwrite
     deleted the source first), MOVE of a missing source no longer deletes the destination, and
-    a recursive COPY copies each entry instead of the top directory over and over.
+    a recursive COPY copies each entry instead of the top directory over and over. A COPY or
+    MOVE destination whose path crosses a symlinked directory is 403, so a link cannot hide
+    that the destination is inside the source.

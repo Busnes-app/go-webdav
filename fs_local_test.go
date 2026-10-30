@@ -86,15 +86,20 @@ func TestLocalFileSystemCopyMove(t *testing.T) {
 	ctx := context.Background()
 	local, _ := newLocalFS(t)
 
-	// An in-root symlink aliases /dir under another path.
+	// In-root symlinks alias /dir and its descendant /dir/sub.
 	alias := filepath.Join(string(local), "alias")
+	deep := filepath.Join(string(local), "deep")
 	if err := os.Symlink("dir", alias); err != nil {
+		t.Fatal(err)
+	}
+	if err := os.Symlink("dir/sub", deep); err != nil {
 		t.Fatal(err)
 	}
 	for _, c := range [][2]string{
 		{"/dir", "/dir"}, {"/dir", "/dir/"}, {"/dir", "/dir/sub/copy"},
 		{"/dir", "/alias"}, {"/dir", "/alias/copy"}, {"/dir", "/alias/sub/copy"},
-		{"/alias", "/dir/copy"}, {"/", "/x"},
+		{"/alias", "/dir/copy"}, {"/dir", "/deep/copy"}, {"/dir", "/deep/x/copy"},
+		{"/", "/x"},
 	} {
 		_, err := local.Copy(ctx, c[0], c[1], &CopyOptions{})
 		if code := httpStatus(err); code != http.StatusForbidden {
@@ -105,15 +110,17 @@ func TestLocalFileSystemCopyMove(t *testing.T) {
 			t.Errorf("Move %v to %v: status %v, want 403", c[0], c[1], code)
 		}
 	}
-	if err := os.Remove(alias); err != nil {
-		t.Fatal(err)
+	for _, l := range []string{alias, deep} {
+		if err := os.Remove(l); err != nil {
+			t.Fatal(err)
+		}
 	}
 	for _, p := range []string{"/dir/a.txt", "/dir/sub/b.txt"} {
 		if _, err := local.Stat(ctx, p); err != nil {
 			t.Fatalf("source damaged by refused copy or move: %v", err)
 		}
 	}
-	for _, p := range []string{"/dir/copy", "/dir/sub/copy", "/x"} {
+	for _, p := range []string{"/dir/copy", "/dir/sub/copy", "/dir/sub/x", "/x"} {
 		if _, err := local.Stat(ctx, p); err == nil {
 			t.Errorf("refused copy or move created %v", p)
 		}
