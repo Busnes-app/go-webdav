@@ -3,6 +3,8 @@
 *.dll
 *.so
 *.dylib
+# A bare `go build ./cmd/webdav-server` writes this to the root.
+/webdav-server
 
 # Test binary, build with `go test -c`
 *.test
