@@ -17,5 +17,6 @@ jobs:
         with:
           go-version: stable
           check-latest: true
+      - run: scripts/check-no-binaries.sh
       - run: go vet -composites=false ./...
       - run: go test -race -count=1 ./...
