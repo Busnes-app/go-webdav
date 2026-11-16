@@ -3,12 +3,15 @@ on:
   push:
     branches: [kycalendar]
   pull_request:
+    types: [opened, synchronize, reopened, ready_for_review]
   workflow_dispatch:
 permissions:
   contents: read
 jobs:
   test:
+    if: github.event.pull_request.draft != true
     runs-on: ubuntu-latest
+    timeout-minutes: 10
     steps:
       - uses: actions/checkout@v7
         with:
