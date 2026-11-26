@@ -1,28 +1,28 @@
 # go-webdav fork
 
-Upstream: github.com/emersion/go-webdav v0.7.0 (MIT, see LICENSE). Module path unchanged;
-KyCalendar wires it with a `replace` in its go.mod.
-Source of truth: github.com/Busnes-app/go-webdav (branch `kycalendar`).
-KyCalendar vendors this branch byte for byte (without `.github`) in `third_party/go-webdav` and
-pins the commit in `third_party/go-webdav.commit`; `scripts/check-fork-sync.sh` there fails on
-any difference. Land a change here first, then sync it into KyCalendar.
+- **Upstream:** [emersion/go-webdav](https://github.com/emersion/go-webdav) `v0.7.0` (MIT, see [LICENSE](LICENSE)). The Go module path is unchanged; [KyCalendar](https://github.com/Busnes-app/KyCalendar) wires it with a `replace` directive in its `go.mod`.
+- **Source of truth:** [Busnes-app/go-webdav](https://github.com/Busnes-app/go-webdav) (branch `kycalendar`).
+- **KyCalendar sync:** KyCalendar vendors this branch byte for byte (without `.github`) in `third_party/go-webdav` and pins the commit in `third_party/go-webdav.commit`; `scripts/check-fork-sync.sh` there fails on any difference. Land a change here first, then sync it into KyCalendar.
 
 ## AI/LLM provenance
 
 The CalDAV patches in this fork were written with large-language-model assistance and
 autonomous coding agents; the git history discloses this (`Co-Authored-By` trailers).
-They are **deliberately not submitted to emersion/go-webdav**: its contribution guidelines
+They are **deliberately not submitted to `emersion/go-webdav`**: its contribution guidelines
 ask for human-authored, non-autonomous, DCO-signed patches, and these do not meet that bar.
 This repository exists so the code is available to anyone who wants it, and so KyCalendar has
-a stable base to vendor. Provided as-is under the MIT license (see `LICENSE`).
+a stable base to vendor. Provided as-is under the MIT license (see [LICENSE](LICENSE)).
 
 **De-fork policy.** The fork tracks upstream and shrinks over time: when upstream ships an
 equivalent of a patch below, that patch is dropped here and the fork rebased onto the newer
 upstream. (Upstream has since added a read-only `current-user-privilege-set`, overlapping the
 privilege half of patch 1 — the first de-fork candidate.)
 
-Patches below are documented for transparency; they are **not** being submitted
-upstream (see AI/LLM provenance) and each is de-forked when upstream ships an equivalent:
+## Patches
+
+The patches below are documented for transparency; they are **not** being submitted
+upstream (see [AI/LLM provenance](#aillm-provenance)) and each is de-forked when upstream
+ships an equivalent:
 
 1. Calendar colour, getctag, sync-token, supported-report-set and per-calendar read-only privileges.
 2. Raw iCalendar bytes on PUT and GET; max-resource-size precondition.
@@ -32,7 +32,7 @@ upstream (see AI/LLM provenance) and each is de-forked when upstream ships an eq
    BYHOUR x BYMINUTE x BYSECOND exceeds 96 matches conservatively without expansion).
 6. calendar-multiget answers each distinct href once: every response holds a full object copy
    until the multistatus is written.
-7. Time-range matching guards rules rrule-go cannot bound (`stalls`, match.go): it checks UNTIL
+7. Time-range matching guards rules rrule-go cannot bound (`stalls`, `caldav/match.go`): it checks UNTIL
    only on a matching candidate, so BYSETPOS on HOURLY, MINUTELY or SECONDLY steps every period
    to year 9999, and a step that never lands on its BYHOUR/BYMINUTE/BYSECOND clock loops forever.
    Both match conservatively without expansion. Direct dependency on rrule-go v1.8.2.
